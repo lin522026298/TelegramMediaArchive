@@ -110,6 +110,27 @@ class CoreBehaviorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "workers"):
             list(app.batch_records([], workers=0))
 
+    def test_resume_parser_accepts_watch_and_poll_interval(self):
+        app = load_module()
+
+        args = app.build_parser().parse_args(
+            [
+                "--root",
+                r"E:\archive",
+                "resume",
+                "--workers",
+                "3",
+                "--watch",
+                "--poll-interval",
+                "120",
+            ]
+        )
+
+        self.assertEqual(args.command, "resume")
+        self.assertEqual(args.workers, 3)
+        self.assertTrue(args.watch)
+        self.assertEqual(args.poll_interval, 120)
+
     def test_archive_db_preserves_downloaded_status_when_reindexing_same_media(self):
         app = load_module()
         with tempfile.TemporaryDirectory() as tmp:

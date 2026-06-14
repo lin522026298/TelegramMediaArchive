@@ -14,7 +14,7 @@ Build a local Windows-friendly Telegram media archiver that downloads photos and
 - light/dark themes,
 - Windows high-DPI awareness,
 - Windows 11-style left navigation,
-- startup and close-to-background settings,
+- startup, close-to-background, watchdog, and local pending-list polling settings,
 - source and portable Windows release packages.
 
 The app must not require Telegram Desktop to remain open during API downloads.
@@ -131,6 +131,8 @@ These invariants are important. Do not break them during refactors.
 5. Completed files are skipped when their size matches the indexed size.
 6. `verify` checks only records marked `downloaded`; `verify --repair` can reset missing/mismatched completed records.
 7. Disk free-space protection must be checked before each batch.
+8. Without `--watch`, `download` and `resume` intentionally run one selected pass and exit.
+9. With `--watch`, the downloader re-queries the local SQLite pending list after each pass and sleeps for `--poll-interval` seconds. It must not automatically re-index Telegram messages.
 
 Current concurrency behavior:
 
@@ -145,6 +147,14 @@ continue to next batch
 
 Completion order inside a batch can differ because files have different sizes, but scheduling order and filenames remain deterministic.
 
+Watch mode:
+
+```text
+TelegramMediaArchiveCLI.exe --root <root> resume --workers 3 --watch --poll-interval 300
+```
+
+Watch mode is a local queue watcher, not a Telegram group watcher. It sees rows already present in `state/archive.sqlite3`; users must run `index`/`Index Media` when they intentionally want to add newly posted group media to the local queue.
+
 ## GUI architecture
 
 `tg_media_app.py` owns Tkinter widgets only. It should not contain command-building rules that can be tested without Tkinter. It enables Windows process DPI awareness before creating the Tk root, then sets Tk scaling from `winfo_fpixels("1i")`; keep this order to avoid blurred rendering on 4K/high-scaling Windows displays.
@@ -155,7 +165,7 @@ The GUI uses this page structure:
 Dashboard -> archive root, local state, quick actions
 Download  -> date/type/limit/workers and download commands
 Account   -> login, chat selection, indexing
-Settings  -> language, theme, startup, close behavior, archive root
+Settings  -> language, theme, watchdog, polling, startup, close behavior, archive root
 Help      -> docs, about, logs, command copy
 ```
 
@@ -184,6 +194,10 @@ TelegramMediaArchiveCLI.exe --root <root> <command>
 
 Known packaging trap: a frozen GUI cannot rely on `python tg_media_archive.py` existing on the user's system. Keep the separate console CLI executable.
 
+For GUI-launched `download` and `resume` commands, the watchdog setting restarts the last download command only when the subprocess exits with a non-zero status and the user did not press `Stop Running Command`. It schedules the restart on the Tk main thread via the output queue; do not call Tk widgets directly from the reader thread.
+
+The GUI accepts `--auto-resume` for managed recovery launches. It opens the app and schedules `_resume_pending()` after the Tk loop starts, so the resulting CLI subprocess is owned by the GUI and participates in the watchdog/stop-command flow.
+
 ## Startup and close behavior
 
 UI preferences are stored in:
@@ -192,7 +206,25 @@ UI preferences are stored in:
 %APPDATA%\TelegramMediaArchive\settings.json
 ```
 
-This file stores only UI preferences: language, theme, default workers, archive root, startup setting, and close behavior. It must not store Telegram sessions, databases, or downloaded media.
+This file stores only UI preferences: language, theme, default workers, archive root, startup setting, close behavior, watchdog setting, polling setting, and polling interval. It must not store Telegram sessions, databases, or downloaded media.
+
+Current settings keys:
+
+```json
+{
+  "language": "zh",
+  "theme": "dark",
+  "workers": "4",
+  "root": "E:\\电报视频导出_断点续传",
+  "start_with_windows": false,
+  "close_to_background": true,
+  "watchdog_enabled": true,
+  "poll_pending": false,
+  "poll_interval": "300"
+}
+```
+
+Read this file with `utf-8-sig`. Windows PowerShell may write UTF-8 with a BOM, and falling back to defaults here can silently disable watchdog/polling settings.
 
 Windows startup uses:
 
@@ -236,6 +268,7 @@ Important test coverage:
 - app command building,
 - frozen CLI command path,
 - app settings persistence,
+- download watchdog/polling command flags,
 - Chinese/English translation presence.
 
 ## Build release artifacts
@@ -255,9 +288,9 @@ Build:
 Expected output:
 
 ```text
-release/TelegramMediaArchive-0.1.1-windows-x86_64/
-release/TelegramMediaArchive-0.1.1-windows-x86_64.zip
-release/TelegramMediaArchive-0.1.1-source.zip
+release/TelegramMediaArchive-0.1.2-windows-x86_64/
+release/TelegramMediaArchive-0.1.2-windows-x86_64.zip
+release/TelegramMediaArchive-0.1.2-source.zip
 ```
 
 The portable folder must include:
@@ -292,20 +325,21 @@ Then add hidden imports to `scripts/build_release.ps1`.
 
 ## Manual smoke test after packaging
 
-1. Open `release\TelegramMediaArchive-0.1.1-windows-x86_64\TelegramMediaArchive.exe`.
+1. Open `release\TelegramMediaArchive-0.1.2-windows-x86_64\TelegramMediaArchive.exe`.
 2. Switch language to English and back to Chinese.
 3. Toggle dark mode.
 4. Visit each left navigation page and check that the buttons match the page purpose.
 5. Open Help and Technical Docs.
 6. Toggle `Start with Windows`, confirm the startup command file is created, then toggle it off unless the user asked to keep it.
 7. Toggle `Close window to background`, close the window, and restore it from the tray if tray support is available.
-8. Click `Setup Help`; the log should show CLI help output.
-9. Click `Copy Last Command`; clipboard should contain the command.
-10. Click `Open Logs`, `Open State`, and `Open Media`; folders should open or be created.
-11. Run:
+8. Toggle the watchdog and polling settings, save, close/reopen the app, and confirm the values persisted in `%APPDATA%\TelegramMediaArchive\settings.json`.
+9. Click `Setup Help`; the log should show CLI help output.
+10. Click `Copy Last Command`; clipboard should contain the command.
+11. Click `Open Logs`, `Open State`, and `Open Media`; folders should open or be created.
+12. Run:
 
    ```powershell
-   .\release\TelegramMediaArchive-0.1.1-windows-x86_64\TelegramMediaArchiveCLI.exe --help
+   .\release\TelegramMediaArchive-0.1.2-windows-x86_64\TelegramMediaArchiveCLI.exe --help
    ```
 
 Do not run login against a maintainer's personal account during generic release verification.

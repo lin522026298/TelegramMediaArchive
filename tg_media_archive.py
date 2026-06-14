@@ -30,6 +30,7 @@ DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_CHUNK_SIZE = 512 * 1024
 DEFAULT_LIMIT = None
 DEFAULT_MIN_FREE_GB = 50
+DEFAULT_POLL_INTERVAL_SECONDS = 300
 CONFIG_NAME = "config.json"
 DB_NAME = "archive.sqlite3"
 SESSION_NAME = "telegram_media_archive"
@@ -695,37 +696,81 @@ async def download_media(
     chunk_size: int,
     min_free_gb: float = DEFAULT_MIN_FREE_GB,
     workers: int = 1,
+    watch: bool = False,
+    poll_interval: int = DEFAULT_POLL_INTERVAL_SECONDS,
 ) -> None:
     if workers < 1:
         raise SystemExit("--workers must be at least 1")
+    if poll_interval < 10:
+        raise SystemExit("--poll-interval must be at least 10 seconds")
     client, config = await create_client(root)
     db = ArchiveDB(db_path(root))
     tz = ZoneInfo(str(config.get("timezone", DEFAULT_TIMEZONE)))
     start_utc, end_utc = parse_date_bounds(start, end, tz)
     try:
         entity = await get_configured_entity(client, root, config)
-        records = db.list_pending(start_utc=start_utc, end_utc=end_utc, kind=kind, include_errors=True, limit=limit)
-        print(f"Pending records selected: {len(records)}")
         min_free_bytes = int(min_free_gb * 1024**3)
-        for batch in batch_records(records, workers):
-            required_bytes = sum(record.size or 0 for record in batch)
-            free_bytes = shutil.disk_usage(root).free
-            if not has_enough_space(free_bytes, required_bytes, min_free_bytes):
-                print(
-                    "Stopping before disk gets too full: "
-                    f"free={format_bytes(free_bytes)}, next_batch={format_bytes(required_bytes)}, "
-                    f"minimum_free={format_bytes(min_free_bytes)}"
+        while True:
+            records = db.list_pending(start_utc=start_utc, end_utc=end_utc, kind=kind, include_errors=True, limit=limit)
+            print(f"Pending records selected: {len(records)}")
+            if not records:
+                if not watch:
+                    break
+                print(f"No pending records. Waiting {poll_interval} seconds before polling again.")
+                await asyncio.sleep(poll_interval)
+                continue
+
+            stopped_for_space = False
+            for batch in batch_records(records, workers):
+                required_bytes = sum(record.size or 0 for record in batch)
+                free_bytes = shutil.disk_usage(root).free
+                if not has_enough_space(free_bytes, required_bytes, min_free_bytes):
+                    print(
+                        "Stopping before disk gets too full: "
+                        f"free={format_bytes(free_bytes)}, next_batch={format_bytes(required_bytes)}, "
+                        f"minimum_free={format_bytes(min_free_bytes)}"
+                    )
+                    stopped_for_space = True
+                    break
+                results = await asyncio.gather(
+                    *(download_one(client, entity, root, tz, db, record, chunk_size) for record in batch),
+                    return_exceptions=True,
                 )
+                if any(result is not True for result in results):
+                    await asyncio.sleep(2)
+
+            if stopped_for_space or not watch:
                 break
-            results = await asyncio.gather(
-                *(download_one(client, entity, root, tz, db, record, chunk_size) for record in batch),
-                return_exceptions=True,
-            )
-            if any(result is not True for result in results):
-                await asyncio.sleep(2)
+            print(f"Download pass complete. Waiting {poll_interval} seconds before polling again.")
+            await asyncio.sleep(poll_interval)
     finally:
         db.close()
         await client.disconnect()
+
+
+def run_download_command(
+    root: Path,
+    start: str | None,
+    end: str | None,
+    kind: str,
+    limit: int | None,
+    chunk_size: int,
+    min_free_gb: float,
+    workers: int,
+    watch: bool,
+    poll_interval: int,
+) -> int:
+    while True:
+        try:
+            asyncio.run(download_media(root, start, end, kind, limit, chunk_size, min_free_gb, workers, watch, poll_interval))
+            return 0
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            if not watch:
+                raise
+            print(f"Download loop failed and will restart in {poll_interval} seconds: {type(exc).__name__}: {exc}", file=sys.stderr)
+            time.sleep(poll_interval)
 
 
 def print_summary(root: Path, timezone_name: str = DEFAULT_TIMEZONE) -> None:
@@ -887,12 +932,16 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     download.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
     download.add_argument("--workers", type=int, default=1)
+    download.add_argument("--watch", action="store_true", help="Keep polling the local pending list after each pass")
+    download.add_argument("--poll-interval", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS, help="Seconds to wait between watch polls")
 
     resume = sub.add_parser("resume", help="Resume all pending downloads")
     resume.add_argument("--limit", type=int, default=None)
     resume.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     resume.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
     resume.add_argument("--workers", type=int, default=1)
+    resume.add_argument("--watch", action="store_true", help="Keep polling the local pending list after each pass")
+    resume.add_argument("--poll-interval", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS, help="Seconds to wait between watch polls")
 
     verify = sub.add_parser("verify", help="Verify downloaded files")
     verify.add_argument("--repair", action="store_true")
@@ -922,9 +971,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif command == "summary":
         print_summary(root, timezone_name=args.timezone)
     elif command == "download":
-        asyncio.run(download_media(root, args.start, args.end, args.kind, args.limit, args.chunk_size, args.min_free_gb, args.workers))
+        return run_download_command(
+            root,
+            args.start,
+            args.end,
+            args.kind,
+            args.limit,
+            args.chunk_size,
+            args.min_free_gb,
+            args.workers,
+            args.watch,
+            args.poll_interval,
+        )
     elif command == "resume":
-        asyncio.run(download_media(root, None, None, "all", args.limit, args.chunk_size, args.min_free_gb, args.workers))
+        return run_download_command(
+            root,
+            None,
+            None,
+            "all",
+            args.limit,
+            args.chunk_size,
+            args.min_free_gb,
+            args.workers,
+            args.watch,
+            args.poll_interval,
+        )
     elif command == "verify":
         return verify_archive(root, repair=args.repair)
     else:

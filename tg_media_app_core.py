@@ -11,10 +11,11 @@ from pathlib import Path
 from tg_media_archive import DEFAULT_ROOT
 
 
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.1.2"
 VALID_KINDS = {"all", "photo", "video"}
 MAX_WORKERS = 8
 DEFAULT_WORKERS = "4"
+DEFAULT_POLL_INTERVAL = "300"
 SUPPORTED_LANGUAGES = ("zh", "en")
 SUPPORTED_THEMES = ("light", "dark")
 LANGUAGE_LABELS = {"zh": "中文", "en": "English"}
@@ -61,6 +62,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "automation": "Automation",
         "start_with_windows": "Start with Windows",
         "close_to_background": "Close window to background",
+        "watchdog_enabled": "Restart failed downloads automatically",
+        "poll_pending": "Keep polling indexed pending items",
+        "poll_interval": "Poll interval (seconds)",
+        "polling_note": "Polling only rechecks the local index. Run Index Media when you want to add newly posted group media.",
         "show_window": "Show Window",
         "quit": "Quit",
         "hidden_message": "Window hidden. Start the app again or use the tray menu to show it.",
@@ -98,6 +103,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "finished": "Finished",
         "failed": "failed",
         "stopped": "Stopped running command.",
+        "watchdog_restarting": "Download stopped unexpectedly. Restarting in 10 seconds",
         "nothing_to_stop": "No command is running.",
         "no_command": "No command has been run yet.",
         "copied": "Copied last command.",
@@ -154,6 +160,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "automation": "自动化",
         "start_with_windows": "开机自启动",
         "close_to_background": "关闭窗口时后台保留",
+        "watchdog_enabled": "下载异常退出后自动重启",
+        "poll_pending": "完成一轮后继续轮询已索引待下载项",
+        "poll_interval": "轮询间隔（秒）",
+        "polling_note": "轮询只重新检查本地索引。需要加入群里新发的内容时，再手动运行“索引媒体”。",
         "show_window": "显示窗口",
         "quit": "退出",
         "hidden_message": "窗口已隐藏。可再次启动 APP 或使用托盘菜单显示。",
@@ -191,6 +201,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "finished": "已完成",
         "failed": "失败",
         "stopped": "已停止当前命令。",
+        "watchdog_restarting": "下载进程异常停止，10 秒后自动重启",
         "nothing_to_stop": "当前没有正在运行的命令。",
         "no_command": "还没有运行过命令。",
         "copied": "已复制上一条命令。",
@@ -217,6 +228,9 @@ class AppSettings:
     root: str = str(DEFAULT_ROOT)
     start_with_windows: bool = False
     close_to_background: bool = True
+    watchdog_enabled: bool = True
+    poll_pending: bool = False
+    poll_interval: str = DEFAULT_POLL_INTERVAL
 
 
 @dataclass(frozen=True)
@@ -279,12 +293,32 @@ def validate_workers(workers: str) -> None:
         raise ValueError(f"workers must be between 1 and {MAX_WORKERS}")
 
 
+def validate_poll_interval(value: str) -> None:
+    text = value.strip()
+    if not text:
+        return
+    try:
+        seconds = int(text)
+    except ValueError as exc:
+        raise ValueError("poll interval must be a positive integer") from exc
+    if seconds < 10:
+        raise ValueError("poll interval must be at least 10 seconds")
+
+
 def _valid_workers_or_default(value: str) -> str:
     try:
         validate_workers(value)
     except ValueError:
         return DEFAULT_WORKERS
     return value.strip() or DEFAULT_WORKERS
+
+
+def _valid_poll_interval_or_default(value: str) -> str:
+    try:
+        validate_poll_interval(value)
+    except ValueError:
+        return DEFAULT_POLL_INTERVAL
+    return value.strip() or DEFAULT_POLL_INTERVAL
 
 
 def _bool_from_value(value: object, default: bool = False) -> bool:
@@ -303,6 +337,7 @@ def normalize_settings(settings: AppSettings) -> AppSettings:
     language = settings.language if settings.language in SUPPORTED_LANGUAGES else "zh"
     theme = settings.theme if settings.theme in SUPPORTED_THEMES else "light"
     workers = _valid_workers_or_default(settings.workers)
+    poll_interval = _valid_poll_interval_or_default(settings.poll_interval)
     root = settings.root.strip() or str(DEFAULT_ROOT)
     return AppSettings(
         language=language,
@@ -311,13 +346,16 @@ def normalize_settings(settings: AppSettings) -> AppSettings:
         root=root,
         start_with_windows=_bool_from_value(settings.start_with_windows, False),
         close_to_background=_bool_from_value(settings.close_to_background, True),
+        watchdog_enabled=_bool_from_value(settings.watchdog_enabled, True),
+        poll_pending=_bool_from_value(settings.poll_pending, False),
+        poll_interval=poll_interval,
     )
 
 
 def load_app_settings(path: Path | None = None) -> AppSettings:
     settings_path = path or app_settings_path()
     try:
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        data = json.loads(settings_path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return AppSettings()
     return normalize_settings(
@@ -328,6 +366,9 @@ def load_app_settings(path: Path | None = None) -> AppSettings:
             root=str(data.get("root", str(DEFAULT_ROOT))),
             start_with_windows=_bool_from_value(data.get("start_with_windows"), False),
             close_to_background=_bool_from_value(data.get("close_to_background"), True),
+            watchdog_enabled=_bool_from_value(data.get("watchdog_enabled"), True),
+            poll_pending=_bool_from_value(data.get("poll_pending"), False),
+            poll_interval=str(data.get("poll_interval", DEFAULT_POLL_INTERVAL)),
         )
     )
 
@@ -404,6 +445,8 @@ def build_command(
     limit: str = "",
     workers: str = "",
     phone: str = "",
+    watch: bool = False,
+    poll_interval: str = "",
 ) -> list[str]:
     if options.cli_exe is not None:
         command = [str(options.cli_exe), "--root", str(options.root), action]
@@ -426,6 +469,11 @@ def build_command(
             command.extend(["--limit", limit.strip()])
         if workers.strip():
             command.extend(["--workers", workers.strip()])
+        validate_poll_interval(poll_interval)
+        if watch:
+            command.append("--watch")
+            if poll_interval.strip():
+                command.extend(["--poll-interval", poll_interval.strip()])
     elif action in {"index", "resume"}:
         if limit.strip():
             validate_download_options("", "", "all", limit)
@@ -433,6 +481,11 @@ def build_command(
         validate_workers(workers)
         if workers.strip():
             command.extend(["--workers", workers.strip()])
+        validate_poll_interval(poll_interval)
+        if watch:
+            command.append("--watch")
+            if poll_interval.strip():
+                command.extend(["--poll-interval", poll_interval.strip()])
     elif action == "login-official":
         if not phone.strip():
             raise ValueError("phone is required for login-official")

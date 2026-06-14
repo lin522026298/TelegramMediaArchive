@@ -72,7 +72,7 @@ class AppCoreTests(unittest.TestCase):
             python_exe=Path(sys.executable),
         )
 
-        command = core.build_command(options, "resume", limit="10", workers="3")
+        command = core.build_command(options, "resume", limit="10", workers="3", watch=True, poll_interval="120")
 
         self.assertEqual(
             command,
@@ -86,6 +86,9 @@ class AppCoreTests(unittest.TestCase):
                 "10",
                 "--workers",
                 "3",
+                "--watch",
+                "--poll-interval",
+                "120",
             ],
         )
 
@@ -127,6 +130,9 @@ class AppCoreTests(unittest.TestCase):
             "nav_settings",
             "start_with_windows",
             "close_to_background",
+            "watchdog_enabled",
+            "poll_pending",
+            "poll_interval",
         ]
 
         for language in ("en", "zh"):
@@ -148,6 +154,9 @@ class AppCoreTests(unittest.TestCase):
                 root=str(Path(r"E:\archive")),
                 start_with_windows=True,
                 close_to_background=False,
+                watchdog_enabled=False,
+                poll_pending=True,
+                poll_interval="120",
             )
             core.save_app_settings(settings, settings_path)
             loaded = core.load_app_settings(settings_path)
@@ -169,6 +178,25 @@ class AppCoreTests(unittest.TestCase):
         self.assertEqual(loaded.root, str(core.DEFAULT_ROOT))
         self.assertFalse(loaded.start_with_windows)
         self.assertTrue(loaded.close_to_background)
+        self.assertTrue(loaded.watchdog_enabled)
+        self.assertFalse(loaded.poll_pending)
+        self.assertEqual(loaded.poll_interval, "300")
+
+    def test_app_settings_accepts_utf8_bom_from_windows_powershell(self):
+        core = load_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "settings.json"
+            settings_path.write_text(
+                '{"workers":"3","poll_pending":true,"poll_interval":"300"}',
+                encoding="utf-8-sig",
+            )
+
+            loaded = core.load_app_settings(settings_path)
+
+        self.assertEqual(loaded.workers, "3")
+        self.assertTrue(loaded.poll_pending)
+        self.assertEqual(loaded.poll_interval, "300")
 
     def test_startup_script_quotes_app_path_and_root(self):
         core = load_module()
@@ -227,6 +255,10 @@ class AppCoreTests(unittest.TestCase):
             core.validate_download_options("2023-09-01", "2023-09-30", "all", "", "abc")
         with self.assertRaisesRegex(ValueError, "workers"):
             core.validate_download_options("2023-09-01", "2023-09-30", "all", "", "9")
+        with self.assertRaisesRegex(ValueError, "poll interval"):
+            core.validate_poll_interval("0")
+        with self.assertRaisesRegex(ValueError, "poll interval"):
+            core.validate_poll_interval("abc")
 
     def test_state_paths_are_under_selected_root_not_desktop_export(self):
         core = load_module()
@@ -242,6 +274,14 @@ class AppCoreTests(unittest.TestCase):
         app_module = importlib.import_module("tg_media_app")
 
         self.assertNotIn("_options", app_module.TelegramArchiveApp.__dict__)
+
+    def test_tkinter_app_parse_args_accepts_auto_resume(self):
+        app_module = importlib.import_module("tg_media_app")
+
+        args = app_module.parse_args(["--root", r"E:\archive", "--auto-resume"])
+
+        self.assertEqual(args.root, Path(r"E:\archive"))
+        self.assertTrue(args.auto_resume)
 
 
 if __name__ == "__main__":

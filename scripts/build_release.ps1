@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$Version = "0.1.1"
+$Version = "0.1.2"
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $Python)) {
     $Python = "python"
@@ -45,7 +45,7 @@ Copy-Item -LiteralPath (Join-Path $Root "requirements.txt") -Destination $Portab
 Copy-Item -LiteralPath (Join-Path $Root "requirements-opentele.txt") -Destination $PortableDir
 Copy-Item -LiteralPath (Join-Path $Root "run_app.bat") -Destination $PortableDir
 
-$excludeDirs = @(".git", ".venv", "__pycache__", "build", "dist", "release", "state", "media", "logs")
+$excludeDirs = @(".git", ".venv", "__pycache__", "build", "dist", "release", "state", "media", "logs", "superpowers")
 $excludeFiles = @("*.session", "*.sqlite3", "*.sqlite3-*", "*.part", "*.pyc", "*.pyo")
 New-Item -ItemType Directory -Force -Path $SourceStage | Out-Null
 robocopy $Root $SourceStage /E /XD $excludeDirs /XF $excludeFiles | Out-Null

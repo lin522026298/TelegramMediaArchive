@@ -1,6 +1,6 @@
 ﻿# Telegram 群媒体可断点下载器
 
-这个仓库提供一个纯 Python 桌面 App 和 CLI，用 Telegram API 归档群组里的图片和视频。它支持断点续传、并发下载、中英文界面、明/暗色主题、高 DPI 适配、帮助文档入口、开机自启动和 Windows x86_64 便携打包。
+这个仓库提供一个纯 Python 桌面 App 和 CLI，用 Telegram API 归档群组里的图片和视频。它支持断点续传、并发下载、下载异常守护、可选本地队列轮询、中英文界面、明/暗色主题、高 DPI 适配、帮助文档入口、开机自启动和 Windows x86_64 便携打包。
 
 默认保存位置可在界面里修改。当前自用配置常用：
 
@@ -44,6 +44,8 @@ python tg_media_app.py
 - `暗色模式` / `Dark mode`：切换明色/暗色主题。
 - `开机自启动` / `Start with Windows`：在 Windows 启动文件夹创建启动脚本。
 - `关闭窗口时后台保留` / `Close window to background`：关闭按钮隐藏窗口，下载任务不因此中断。
+- `下载异常退出后自动重启` / `Restart failed downloads automatically`：从 APP 启动的下载命令异常退出时，10 秒后自动用上一条下载命令重启。
+- `完成一轮后继续轮询已索引待下载项` / `Keep polling indexed pending items`：下载一轮结束后继续检查本地 SQLite 中已经索引的待下载项。
 - `帮助文档` / `Help`：打开面向普通用户的帮助。
 - `技术文档` / `Technical Docs`：打开面向开发者和 AI 的复现文档。
 - `API 登录` / `Login api_id`：首次登录或验证 Telegram API 会话，会打开交互式终端输入验证码。
@@ -58,6 +60,8 @@ python tg_media_app.py
 - `Copy Last Command`：复制最近一次命令，方便排查问题。
 
 `Download options` 里的 `Workers` 控制下载并发数，App 默认 4，允许 1-8。首次登录和选群仍使用交互式终端，是为了验证码、二步验证密码、群选择等输入流程保持可靠；索引和下载会在 App 日志面板中显示进度。
+
+轮询只重新检查本地数据库里已经存在的记录，不会自动把群组中新发的内容加入队列。需要加入新消息时，手动运行 `Index Media`。
 
 ## 文档
 
@@ -132,6 +136,12 @@ python tg_media_archive.py download --from 2023-09-01 --to 2023-09-30 --kind all
 python tg_media_archive.py resume --workers 4
 ```
 
+持续轮询已经索引的待下载队列：
+
+```powershell
+python tg_media_archive.py resume --workers 3 --watch --poll-interval 300
+```
+
 并发下载按数据库里的消息时间和消息 ID 分批调度，例如 `--workers 4` 会同时处理当前顺序里的 4 个文件，等这一批结束后再进入下一批。每个文件写入独立的 `.part` 文件，完成后再原子重命名为正式文件；断点续传按磁盘上实际 `.part` 大小恢复，不依赖日志里的进度数字。
 
 检查已下载文件是否缺失或大小不符：
@@ -163,9 +173,9 @@ python -m venv .venv
 输出文件：
 
 ```text
-release\TelegramMediaArchive-0.1.1-source.zip
-release\TelegramMediaArchive-0.1.1-windows-x86_64.zip
-release\TelegramMediaArchive-0.1.1-windows-x86_64\
+release\TelegramMediaArchive-0.1.2-source.zip
+release\TelegramMediaArchive-0.1.2-windows-x86_64.zip
+release\TelegramMediaArchive-0.1.2-windows-x86_64\
 ```
 
 便携包里包含：

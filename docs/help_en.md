@@ -33,7 +33,7 @@ The app uses a left navigation layout:
 - `Dashboard`: archive root, local state, and common actions.
 - `Download`: date range, type, limit, workers, resume, verify.
 - `Account`: login, built-in API login, chat selection, chat listing, indexing.
-- `Settings`: language, dark mode, startup, close behavior, archive root.
+- `Settings`: language, dark mode, download watchdog, polling, startup, close behavior, archive root.
 - `Help`: user help, technical docs, about, logs, command copy.
 
 The app enables Windows high-DPI awareness. It should look sharper on 4K displays than the old build. If Windows display scaling changes while the app is open, close and reopen the app.
@@ -57,6 +57,10 @@ The app enables Windows high-DPI awareness. It should look sharper on 4K display
 
 - `Start with Windows`: creates a startup `.cmd` file in the Windows Startup folder. It opens the app with the current archive root.
 - `Close window to background`: the close button hides the window and keeps the app available through the tray menu when tray support is available. Downloads launched outside the GUI continue independently.
+- `Restart failed downloads automatically`: applies to download commands launched from the GUI. If the download subprocess exits with an error, the app waits 10 seconds and restarts the last download command. Manual `Stop Running Command` does not trigger a restart.
+- `Keep polling indexed pending items`: keeps the download command alive after a pass and rechecks the local SQLite pending list at the configured interval.
+- `Poll interval (seconds)`: wait time between polling passes. Minimum 10 seconds; default 300 seconds.
+- Polling only rechecks media already indexed into the local database. It does not automatically add newly posted Telegram group media. Run `Index Media` when you want to add new posts to the local queue.
 - `Archive root`: the folder that stores login state, the SQLite database, media files, `.part` files, and logs.
 
 ## UI-to-function checklist
@@ -64,7 +68,7 @@ The app enables Windows high-DPI awareness. It should look sharper on 4K display
 - Login and chat selection live on `Account`.
 - Date/type/limit/workers live on `Download`.
 - Folder and state checks live on `Dashboard`.
-- Language/theme/startup/close behavior live on `Settings`.
+- Language/theme/watchdog/polling/startup/close behavior live on `Settings`.
 - Documentation and troubleshooting utilities live on `Help`.
 
 ## Download options
@@ -74,12 +78,15 @@ The app enables Windows high-DPI awareness. It should look sharper on 4K display
 - `Kind`: `all`, `photo`, or `video`.
 - `Limit`: process only the first N records; useful for testing.
 - `Workers`: concurrent file downloads. Default is 4, allowed range is 1-8.
+- If `Keep polling indexed pending items` is enabled, `Resume Pending` and `Download Range` add `--watch` to the CLI command and keep rechecking the local pending list.
 
 ## Resume and safety model
 
 Every unfinished file is written to a separate `.part` file. A file is renamed to its final name only after the full download finishes. Resume uses the actual size of the `.part` file on disk.
 
 Concurrent downloads are scheduled in database order by message date and ID. With `Workers = 4`, the app runs four files from the current ordered batch, waits for that batch, then continues.
+
+The GUI window and the download subprocess are separate. In old builds the window could remain open after the downloader exited. Enable `Restart failed downloads automatically` to restart failed GUI-launched download subprocesses, and enable polling when you want the CLI to keep checking already indexed pending records after each pass.
 
 ## Important cautions
 
