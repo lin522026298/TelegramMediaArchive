@@ -1,0 +1,4 @@
+-r requirements.txt
+opentele>=1.15,<2
+pystray>=0.19,<1
+pillow>=10,<12
