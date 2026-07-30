@@ -12,6 +12,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from sqlite_snapshot import SnapshotResult, create_daily_snapshot
 from tg_media_app_core import (
     APP_VERSION,
     AppSettings,
@@ -29,6 +30,7 @@ from tg_media_app_core import (
     translate,
     validate_download_options,
     validate_poll_interval,
+    window_dimensions,
 )
 from tg_media_archive import DEFAULT_ROOT
 
@@ -92,6 +94,8 @@ class TelegramArchiveApp(tk.Tk):
         self.watchdog_var = tk.BooleanVar(value=self.settings.watchdog_enabled)
         self.poll_pending_var = tk.BooleanVar(value=self.settings.poll_pending)
         self.poll_interval_var = tk.StringVar(value=self.settings.poll_interval)
+        self.daily_backup_var = tk.BooleanVar(value=self.settings.daily_backup_enabled)
+        self.snapshot_mirror_var = tk.StringVar(value=self.settings.snapshot_mirror_dir)
         self.from_var = tk.StringVar()
         self.to_var = tk.StringVar()
         self.kind_var = tk.StringVar(value="all")
@@ -103,6 +107,7 @@ class TelegramArchiveApp(tk.Tk):
         self._stop_requested = False
         self.output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.last_command: list[str] | None = None
+        self._snapshot_thread: threading.Thread | None = None
         self.current_page = "dashboard"
         self.palette = LIGHT
         self.tray_icon = None
@@ -112,10 +117,9 @@ class TelegramArchiveApp(tk.Tk):
         self._pages: dict[str, ttk.Frame] = {}
 
         self.title(self._t("app_title"))
-        self.geometry("1280x820")
-        self.minsize(1060, 680)
+        self._dpi_ratio = self._configure_dpi_scaling()
+        self._configure_window_geometry()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._configure_dpi_scaling()
         self._build_ui()
         self._apply_language()
         self._apply_theme()
@@ -123,13 +127,26 @@ class TelegramArchiveApp(tk.Tk):
         self._refresh_status()
         self._setup_tray_if_available()
         self.after(100, self._drain_output)
+        self.after(1500, self._check_daily_snapshot)
 
-    def _configure_dpi_scaling(self) -> None:
+    def _configure_dpi_scaling(self) -> float:
         try:
-            scaling = max(1.0, self.winfo_fpixels("1i") / 72.0)
-            self.tk.call("tk", "scaling", scaling)
+            pixels_per_inch = float(self.winfo_fpixels("1i"))
+            self.tk.call("tk", "scaling", max(1.0, pixels_per_inch / 72.0))
+            return max(1.0, pixels_per_inch / 96.0)
         except tk.TclError:
-            pass
+            return 1.0
+
+    def _configure_window_geometry(self) -> None:
+        screen_width = max(1, self.winfo_screenwidth())
+        screen_height = max(1, self.winfo_screenheight())
+        width, height, minimum_width, minimum_height = window_dimensions(
+            self._dpi_ratio,
+            screen_width,
+            screen_height,
+        )
+        self.geometry(f"{width}x{height}")
+        self.minsize(minimum_width, minimum_height)
 
     def _language_code(self) -> str:
         label = self.language_var.get()
@@ -216,7 +233,7 @@ class TelegramArchiveApp(tk.Tk):
         self._register_text(ttk.Button(toolbar, command=self._copy_last_command), "copy_command").grid(row=0, column=1, padx=4)
         self._register_text(ttk.Button(toolbar, command=self._clear_log), "clear_log").grid(row=0, column=2, padx=4)
         self._register_text(ttk.Button(toolbar, command=self._stop_process), "stop_running").grid(row=0, column=3, padx=4)
-        self.log = self._remember_text_widget(scrolledtext.ScrolledText(log_card, height=9, wrap="word", borderwidth=0))
+        self.log = self._remember_text_widget(scrolledtext.ScrolledText(log_card, height=6, wrap="word", borderwidth=0))
         self.log.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
         self.log.configure(state="disabled")
 
@@ -260,6 +277,7 @@ class TelegramArchiveApp(tk.Tk):
             ("verify_files", lambda: self._run_logged("verify")),
             ("open_download_folder", lambda: self._open_path(archive_paths(self._root_path()).media_dir)),
             ("open_state", lambda: self._open_path(archive_paths(self._root_path()).state_dir)),
+            ("open_snapshots", lambda: self._open_path(archive_paths(self._root_path()).snapshots_dir)),
             ("open_logs", lambda: self._open_path(archive_paths(self._root_path()).log_dir)),
         ]
         for row, (key, command) in enumerate(actions, start=1):
@@ -351,13 +369,34 @@ class TelegramArchiveApp(tk.Tk):
             row=5, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
 
-        storage = self._card(parent, "storage")
-        storage.grid(row=2, column=0, columnspan=2, sticky="ew")
-        storage.columnconfigure(0, weight=1)
-        ttk.Entry(storage, textvariable=self.root_var).grid(row=1, column=0, sticky="ew", padx=(0, 8))
-        self._register_text(ttk.Button(storage, command=self._browse_root), "browse").grid(row=1, column=1, padx=4)
-        self._register_text(ttk.Button(storage, command=self._save_settings, style="Accent.TButton"), "save_settings").grid(row=2, column=0, sticky="w", pady=(14, 0))
-        self._register_text(ttk.Button(storage, command=self._restore_defaults), "restore_defaults").grid(row=2, column=1, sticky="e", pady=(14, 0))
+        data_safety = self._card(parent, "data_safety")
+        data_safety.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        data_safety.columnconfigure(0, weight=1)
+        self._register_text(
+            ttk.Checkbutton(data_safety, variable=self.daily_backup_var, command=self._save_settings),
+            "daily_backup_enabled",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=4)
+        self._register_text(ttk.Label(data_safety), "snapshot_mirror_dir").grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(8, 4)
+        )
+        ttk.Entry(data_safety, textvariable=self.snapshot_mirror_var).grid(
+            row=3, column=0, sticky="ew", padx=(0, 8)
+        )
+        self._register_text(ttk.Button(data_safety, command=self._browse_snapshot_mirror), "browse").grid(
+            row=3, column=1, padx=4
+        )
+        self._register_text(ttk.Button(data_safety, command=self._manual_snapshot), "backup_now").grid(
+            row=3, column=2, padx=4
+        )
+        self._register_text(ttk.Label(data_safety, style="Muted.TLabel"), "snapshot_note").grid(
+            row=4, column=0, columnspan=3, sticky="w", pady=(10, 2)
+        )
+        self._register_text(ttk.Button(data_safety, command=self._save_settings, style="Accent.TButton"), "save_settings").grid(
+            row=5, column=0, sticky="w", pady=(12, 0)
+        )
+        self._register_text(ttk.Button(data_safety, command=self._restore_defaults), "restore_defaults").grid(
+            row=5, column=2, sticky="e", pady=(12, 0)
+        )
 
     def _build_help_page(self, parent: ttk.Frame) -> None:
         card = self._card(parent, "help_title")
@@ -420,6 +459,8 @@ class TelegramArchiveApp(tk.Tk):
             watchdog_enabled=self.watchdog_var.get(),
             poll_pending=self.poll_pending_var.get(),
             poll_interval=self.poll_interval_var.get().strip() or "300",
+            daily_backup_enabled=self.daily_backup_var.get(),
+            snapshot_mirror_dir=self.snapshot_mirror_var.get().strip(),
         )
         save_app_settings(settings)
         if getattr(sys, "frozen", False):
@@ -434,6 +475,8 @@ class TelegramArchiveApp(tk.Tk):
         self.watchdog_var.set(True)
         self.poll_pending_var.set(False)
         self.poll_interval_var.set("300")
+        self.daily_backup_var.set(True)
+        self.snapshot_mirror_var.set("")
         self.workers_var.set("4")
         self._save_settings()
         self._apply_language()
@@ -528,6 +571,75 @@ class TelegramArchiveApp(tk.Tk):
             self._save_settings()
             self._refresh_status()
 
+    def _browse_snapshot_mirror(self) -> None:
+        current = self.snapshot_mirror_var.get().strip()
+        initial = Path(current) if current else self._root_path().parent
+        selected = filedialog.askdirectory(initialdir=str(initial))
+        if selected:
+            self.snapshot_mirror_var.set(selected)
+            self._save_settings()
+
+    def _manual_snapshot(self) -> None:
+        self._save_settings()
+        self._request_snapshot(force=True, announce=True)
+
+    def _check_daily_snapshot(self) -> None:
+        if self.daily_backup_var.get():
+            self._request_snapshot(force=False, announce=False)
+        self.after(300_000, self._check_daily_snapshot)
+
+    def _request_snapshot(self, *, force: bool, announce: bool) -> None:
+        if self._snapshot_thread and self._snapshot_thread.is_alive():
+            return
+        paths = archive_paths(self._root_path())
+        if not paths.db_path.is_file():
+            if announce:
+                self._append_log(f"[snapshot] {self._t('snapshot_failed')}: {paths.db_path}\n")
+            return
+        mirror_text = self.snapshot_mirror_var.get().strip()
+        mirror_dir = Path(mirror_text).expanduser() if mirror_text else None
+        language = self._language_code()
+        self._snapshot_thread = threading.Thread(
+            target=self._snapshot_worker,
+            args=(paths.db_path, paths.snapshots_dir, mirror_dir, force, announce, language),
+            daemon=True,
+        )
+        self._snapshot_thread.start()
+
+    def _snapshot_worker(
+        self,
+        source_db: Path,
+        primary_dir: Path,
+        mirror_dir: Path | None,
+        force: bool,
+        announce: bool,
+        language: str,
+    ) -> None:
+        try:
+            result = create_daily_snapshot(
+                source_db,
+                primary_dir,
+                mirror_dir=mirror_dir,
+                force=force,
+            )
+        except Exception as exc:
+            message = f"[snapshot] {translate(language, 'snapshot_failed')}: {type(exc).__name__}: {exc}\n"
+            self.output_queue.put(("log", message))
+        else:
+            self._report_snapshot_result(result, announce, language)
+
+    def _report_snapshot_result(self, result: SnapshotResult, announce: bool, language: str) -> None:
+        if result.primary_created or result.mirror_created:
+            destinations = [str(result.primary)]
+            if result.mirror is not None:
+                destinations.append(str(result.mirror))
+            message = f"[snapshot] {translate(language, 'snapshot_created')}: {' | '.join(destinations)}\n"
+            self.output_queue.put(("log", message))
+            return
+        if announce:
+            message = f"[snapshot] {translate(language, 'snapshot_current')}: {result.primary}\n"
+            self.output_queue.put(("log", message))
+
     def _refresh_status(self) -> None:
         root = self._root_path()
         paths = archive_paths(root)
@@ -535,6 +647,7 @@ class TelegramArchiveApp(tk.Tk):
         paths.state_dir.mkdir(parents=True, exist_ok=True)
         paths.media_dir.mkdir(parents=True, exist_ok=True)
         paths.log_dir.mkdir(parents=True, exist_ok=True)
+        paths.snapshots_dir.mkdir(parents=True, exist_ok=True)
         self.status_text.configure(state="normal")
         self.status_text.delete("1.0", tk.END)
         self.status_text.insert(tk.END, "\n".join(status_lines(root, self._language_code())))

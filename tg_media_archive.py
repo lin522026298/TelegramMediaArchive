@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
+from sqlite_snapshot import create_daily_snapshot
+
 
 DEFAULT_ROOT = Path(os.environ.get("TG_ARCHIVE_ROOT", r"E:\电报视频导出_断点续传"))
 DEFAULT_TIMEZONE = "Asia/Shanghai"
@@ -31,6 +33,7 @@ DEFAULT_CHUNK_SIZE = 512 * 1024
 DEFAULT_LIMIT = None
 DEFAULT_MIN_FREE_GB = 50
 DEFAULT_POLL_INTERVAL_SECONDS = 300
+BACKPRESSURE_FLAG_NAME = "cloud-backpressure.pause"
 CONFIG_NAME = "config.json"
 DB_NAME = "archive.sqlite3"
 SESSION_NAME = "telegram_media_archive"
@@ -313,7 +316,7 @@ class ArchiveDB:
         include_errors: bool = True,
         limit: int | None = None,
     ) -> list[MediaRecord]:
-        filters = ["status != 'downloaded'"]
+        filters = ["status NOT IN ('downloaded', 'archived')"]
         params: list[Any] = []
         if not include_errors:
             filters.append("status != 'error'")
@@ -401,6 +404,10 @@ def db_path(root: Path) -> Path:
 
 def session_path(root: Path) -> Path:
     return state_dir(root) / SESSION_NAME
+
+
+def cloud_backpressure_path(root: Path) -> Path:
+    return state_dir(root) / BACKPRESSURE_FLAG_NAME
 
 
 def ensure_layout(root: Path) -> None:
@@ -711,6 +718,17 @@ async def download_media(
         entity = await get_configured_entity(client, root, config)
         min_free_bytes = int(min_free_gb * 1024**3)
         while True:
+            backpressure = cloud_backpressure_path(root)
+            if backpressure.exists():
+                print(
+                    "Cloud archive backpressure is active. "
+                    f"Waiting for encrypted upload to free space: {backpressure}"
+                )
+                if not watch:
+                    break
+                await asyncio.sleep(poll_interval)
+                continue
+
             records = db.list_pending(start_utc=start_utc, end_utc=end_utc, kind=kind, include_errors=True, limit=limit)
             print(f"Pending records selected: {len(records)}")
             if not records:
@@ -721,7 +739,15 @@ async def download_media(
                 continue
 
             stopped_for_space = False
+            stopped_for_backpressure = False
             for batch in batch_records(records, workers):
+                if backpressure.exists():
+                    print(
+                        "Cloud archive backpressure became active. "
+                        "Pausing before the next download batch."
+                    )
+                    stopped_for_backpressure = True
+                    break
                 required_bytes = sum(record.size or 0 for record in batch)
                 free_bytes = shutil.disk_usage(root).free
                 if not has_enough_space(free_bytes, required_bytes, min_free_bytes):
@@ -741,6 +767,13 @@ async def download_media(
 
             if stopped_for_space or not watch:
                 break
+            if stopped_for_backpressure:
+                print(
+                    f"Encrypted upload is draining the local queue. "
+                    f"Waiting {poll_interval} seconds before checking again."
+                )
+                await asyncio.sleep(poll_interval)
+                continue
             print(f"Download pass complete. Waiting {poll_interval} seconds before polling again.")
             await asyncio.sleep(poll_interval)
     finally:
@@ -825,6 +858,27 @@ def verify_archive(root: Path, repair: bool = False) -> int:
         db.close()
 
 
+def snapshot_archive(root: Path, mirror_dir: Path | None = None, force: bool = False) -> int:
+    source = db_path(root)
+    primary_dir = state_dir(root) / "snapshots"
+    try:
+        result = create_daily_snapshot(
+            source,
+            primary_dir,
+            mirror_dir=mirror_dir,
+            force=force,
+        )
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        print(f"Snapshot failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    state = "created" if result.primary_created else "already current"
+    print(f"Snapshot {state}: {result.primary}")
+    if result.mirror is not None:
+        mirror_state = "created" if result.mirror_created else "already current"
+        print(f"Mirror {mirror_state}: {result.mirror}")
+    return 0
+
+
 def print_setup_help(root: Path) -> None:
     print(
         f"""
@@ -864,6 +918,7 @@ Telegram media archive menu
 7. Resume all pending downloads
 8. Verify downloaded files
 9. List recent chats
+10. Create today's SQLite snapshot
 0. Exit
 """.strip()
         )
@@ -899,6 +954,8 @@ Telegram media archive menu
             verify_archive(root, repair=repair)
         elif choice == "9":
             asyncio.run(list_chats(root))
+        elif choice == "10":
+            snapshot_archive(root)
         elif choice == "0":
             return
         else:
@@ -945,6 +1002,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = sub.add_parser("verify", help="Verify downloaded files")
     verify.add_argument("--repair", action="store_true")
+    snapshot = sub.add_parser("snapshot", help="Create a consistent daily SQLite snapshot")
+    snapshot.add_argument("--mirror", type=Path, default=None, help="Optional second snapshot directory")
+    snapshot.add_argument("--force", action="store_true", help="Replace today's existing snapshot")
     return parser
 
 
@@ -998,6 +1058,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     elif command == "verify":
         return verify_archive(root, repair=args.repair)
+    elif command == "snapshot":
+        return snapshot_archive(root, mirror_dir=args.mirror, force=args.force)
     else:
         parser.error(f"Unknown command: {command}")
     return 0

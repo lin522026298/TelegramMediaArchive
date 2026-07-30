@@ -11,7 +11,7 @@ from pathlib import Path
 from tg_media_archive import DEFAULT_ROOT
 
 
-APP_VERSION = "0.1.2"
+APP_VERSION = "0.1.3"
 VALID_KINDS = {"all", "photo", "video"}
 MAX_WORKERS = 8
 DEFAULT_WORKERS = "4"
@@ -60,12 +60,21 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "appearance": "Appearance",
         "behavior": "Behavior",
         "automation": "Automation",
+        "data_safety": "Data safety",
         "start_with_windows": "Start with Windows",
         "close_to_background": "Close window to background",
         "watchdog_enabled": "Restart failed downloads automatically",
         "poll_pending": "Keep polling indexed pending items",
         "poll_interval": "Poll interval (seconds)",
         "polling_note": "Polling only rechecks the local index. Run Index Media when you want to add newly posted group media.",
+        "daily_backup_enabled": "Create one consistent SQLite snapshot per running day",
+        "snapshot_mirror_dir": "Optional snapshot mirror directory",
+        "snapshot_note": "Runs only while this app is open. SQLite's backup API keeps snapshots consistent while downloads continue.",
+        "backup_now": "Back Up Now",
+        "open_snapshots": "Open Snapshots",
+        "snapshot_created": "SQLite snapshot created",
+        "snapshot_current": "Today's SQLite snapshot is already current",
+        "snapshot_failed": "SQLite snapshot failed",
         "show_window": "Show Window",
         "quit": "Quit",
         "hidden_message": "Window hidden. Start the app again or use the tray menu to show it.",
@@ -158,12 +167,21 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "appearance": "外观",
         "behavior": "行为",
         "automation": "自动化",
+        "data_safety": "数据安全",
         "start_with_windows": "开机自启动",
         "close_to_background": "关闭窗口时后台保留",
         "watchdog_enabled": "下载异常退出后自动重启",
         "poll_pending": "完成一轮后继续轮询已索引待下载项",
         "poll_interval": "轮询间隔（秒）",
         "polling_note": "轮询只重新检查本地索引。需要加入群里新发的内容时，再手动运行“索引媒体”。",
+        "daily_backup_enabled": "应用运行期间每天创建一份 SQLite 一致性快照",
+        "snapshot_mirror_dir": "快照镜像目录（可留空）",
+        "snapshot_note": "仅在本应用运行时执行；使用 SQLite 正规备份接口，下载继续进行时快照仍保持一致。",
+        "backup_now": "立即备份",
+        "open_snapshots": "打开快照目录",
+        "snapshot_created": "SQLite 快照已创建",
+        "snapshot_current": "今天的 SQLite 快照已经存在",
+        "snapshot_failed": "SQLite 快照失败",
         "show_window": "显示窗口",
         "quit": "退出",
         "hidden_message": "窗口已隐藏。可再次启动 APP 或使用托盘菜单显示。",
@@ -231,6 +249,8 @@ class AppSettings:
     watchdog_enabled: bool = True
     poll_pending: bool = False
     poll_interval: str = DEFAULT_POLL_INTERVAL
+    daily_backup_enabled: bool = True
+    snapshot_mirror_dir: str = ""
 
 
 @dataclass(frozen=True)
@@ -249,6 +269,7 @@ class ArchivePaths:
     log_dir: Path
     config_path: Path
     db_path: Path
+    snapshots_dir: Path
 
 
 def archive_paths(root: Path) -> ArchivePaths:
@@ -259,7 +280,19 @@ def archive_paths(root: Path) -> ArchivePaths:
         log_dir=root / "logs",
         config_path=root / "state" / "config.json",
         db_path=root / "state" / "archive.sqlite3",
+        snapshots_dir=root / "state" / "snapshots",
     )
+
+
+def window_dimensions(dpi_ratio: float, screen_width: int, screen_height: int) -> tuple[int, int, int, int]:
+    ratio = max(1.0, float(dpi_ratio))
+    available_width = max(1, int(screen_width))
+    available_height = max(1, int(screen_height))
+    width = min(round(1280 * ratio), round(available_width * 0.92))
+    height = min(round(820 * ratio), round(available_height * 0.90))
+    minimum_width = min(round(1060 * ratio), round(available_width * 0.80))
+    minimum_height = min(round(680 * ratio), round(available_height * 0.75))
+    return width, height, minimum_width, minimum_height
 
 
 def translate(language: str, key: str) -> str:
@@ -349,6 +382,8 @@ def normalize_settings(settings: AppSettings) -> AppSettings:
         watchdog_enabled=_bool_from_value(settings.watchdog_enabled, True),
         poll_pending=_bool_from_value(settings.poll_pending, False),
         poll_interval=poll_interval,
+        daily_backup_enabled=_bool_from_value(settings.daily_backup_enabled, True),
+        snapshot_mirror_dir=settings.snapshot_mirror_dir.strip(),
     )
 
 
@@ -369,6 +404,8 @@ def load_app_settings(path: Path | None = None) -> AppSettings:
             watchdog_enabled=_bool_from_value(data.get("watchdog_enabled"), True),
             poll_pending=_bool_from_value(data.get("poll_pending"), False),
             poll_interval=str(data.get("poll_interval", DEFAULT_POLL_INTERVAL)),
+            daily_backup_enabled=_bool_from_value(data.get("daily_backup_enabled"), True),
+            snapshot_mirror_dir=str(data.get("snapshot_mirror_dir", "")),
         )
     )
 

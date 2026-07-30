@@ -33,7 +33,7 @@ The app uses a left navigation layout:
 - `Dashboard`: archive root, local state, and common actions.
 - `Download`: date range, type, limit, workers, resume, verify.
 - `Account`: login, built-in API login, chat selection, chat listing, indexing.
-- `Settings`: language, dark mode, download watchdog, polling, startup, close behavior, archive root.
+- `Settings`: language, dark mode, download watchdog, polling, daily SQLite snapshots, startup, and close behavior.
 - `Help`: user help, technical docs, about, logs, command copy.
 
 The app enables Windows high-DPI awareness. It should look sharper on 4K displays than the old build. If Windows display scaling changes while the app is open, close and reopen the app.
@@ -61,7 +61,10 @@ The app enables Windows high-DPI awareness. It should look sharper on 4K display
 - `Keep polling indexed pending items`: keeps the download command alive after a pass and rechecks the local SQLite pending list at the configured interval.
 - `Poll interval (seconds)`: wait time between polling passes. Minimum 10 seconds; default 300 seconds.
 - Polling only rechecks media already indexed into the local database. It does not automatically add newly posted Telegram group media. Run `Index Media` when you want to add new posts to the local queue.
-- `Archive root`: the folder that stores login state, the SQLite database, media files, `.part` files, and logs.
+- `Archive root`: lives on `Dashboard` and stores login state, the SQLite database, media files, `.part` files, and logs.
+- `Create one consistent SQLite snapshot per running day`: while the app is open, it checks every five minutes and uses SQLite's backup API without stopping downloads.
+- `Optional snapshot mirror directory`: stores a verified second copy on another disk. Leave it empty to keep only `state\snapshots`.
+- `Back Up Now`: atomically refreshes today's snapshot and runs `PRAGMA quick_check`.
 
 ## UI-to-function checklist
 
@@ -70,6 +73,17 @@ The app enables Windows high-DPI awareness. It should look sharper on 4K display
 - Folder and state checks live on `Dashboard`.
 - Language/theme/watchdog/polling/startup/close behavior live on `Settings`.
 - Documentation and troubleshooting utilities live on `Help`.
+
+## Daily database snapshots
+
+The primary snapshot is `<archive root>\state\snapshots\archive-YYYY-MM-DD.sqlite3`.
+The app writes a temporary database through `sqlite3.Connection.backup()`, verifies it,
+then atomically replaces the final snapshot. The mirror follows the same verified,
+atomic-copy process.
+
+This is not a Windows scheduled task. It runs only while the app is open, including
+when hidden in the tray. On the next launch, the app creates that day's snapshot if it
+does not already exist.
 
 ## Download options
 

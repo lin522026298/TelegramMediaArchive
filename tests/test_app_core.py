@@ -133,6 +133,9 @@ class AppCoreTests(unittest.TestCase):
             "watchdog_enabled",
             "poll_pending",
             "poll_interval",
+            "daily_backup_enabled",
+            "snapshot_mirror_dir",
+            "backup_now",
         ]
 
         for language in ("en", "zh"):
@@ -157,6 +160,8 @@ class AppCoreTests(unittest.TestCase):
                 watchdog_enabled=False,
                 poll_pending=True,
                 poll_interval="120",
+                daily_backup_enabled=False,
+                snapshot_mirror_dir=str(Path(r"D:\Cloud Storage\Openlist\state-backups")),
             )
             core.save_app_settings(settings, settings_path)
             loaded = core.load_app_settings(settings_path)
@@ -181,6 +186,8 @@ class AppCoreTests(unittest.TestCase):
         self.assertTrue(loaded.watchdog_enabled)
         self.assertFalse(loaded.poll_pending)
         self.assertEqual(loaded.poll_interval, "300")
+        self.assertTrue(loaded.daily_backup_enabled)
+        self.assertEqual(loaded.snapshot_mirror_dir, "")
 
     def test_app_settings_accepts_utf8_bom_from_windows_powershell(self):
         core = load_module()
@@ -268,12 +275,30 @@ class AppCoreTests(unittest.TestCase):
 
         self.assertEqual(paths.state_dir, root / "state")
         self.assertEqual(paths.media_dir, root / "media")
+        self.assertEqual(paths.snapshots_dir, root / "state" / "snapshots")
         self.assertNotEqual(paths.media_dir, Path(r"E:\电报视频导出"))
 
     def test_tkinter_app_does_not_shadow_internal_options_method(self):
         app_module = importlib.import_module("tg_media_app")
 
         self.assertNotIn("_options", app_module.TelegramArchiveApp.__dict__)
+
+    def test_window_dimensions_scale_physical_window_for_high_dpi(self):
+        core = load_module()
+
+        dimensions = core.window_dimensions(1.5, 3840, 2160)
+
+        self.assertEqual(dimensions, (1920, 1230, 1590, 1020))
+
+    def test_window_dimensions_stay_within_small_screen(self):
+        core = load_module()
+
+        width, height, minimum_width, minimum_height = core.window_dimensions(1.5, 1366, 768)
+
+        self.assertLessEqual(width, round(1366 * 0.92))
+        self.assertLessEqual(height, round(768 * 0.90))
+        self.assertLessEqual(minimum_width, width)
+        self.assertLessEqual(minimum_height, height)
 
     def test_tkinter_app_parse_args_accepts_auto_resume(self):
         app_module = importlib.import_module("tg_media_app")

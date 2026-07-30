@@ -25,6 +25,7 @@ The app must not require Telegram Desktop to remain open during API downloads.
 tg_media_archive.py          Core CLI: auth, chat selection, indexing, download, verify
 tg_media_app.py              Tkinter GUI
 tg_media_app_core.py         Testable GUI helpers: commands, settings, i18n, status lines
+sqlite_snapshot.py           Verified daily SQLite backup implementation
 tg_media_cli.py              Console entry point for packaged CLI exe
 run_app.bat                  Source-mode GUI launcher
 requirements.txt             Base runtime dependencies
@@ -134,6 +135,21 @@ These invariants are important. Do not break them during refactors.
 8. Without `--watch`, `download` and `resume` intentionally run one selected pass and exit.
 9. With `--watch`, the downloader re-queries the local SQLite pending list after each pass and sleeps for `--poll-interval` seconds. It must not automatically re-index Telegram messages.
 
+## Daily SQLite snapshot invariant
+
+`sqlite_snapshot.create_daily_snapshot()` must use `sqlite3.Connection.backup()`.
+Never copy the live database and its `-wal`/`-shm` files as an ad hoc backup.
+
+The implementation writes a temporary database, closes every SQLite connection,
+runs `PRAGMA quick_check`, and only then calls `os.replace()`. Windows requires
+connections to be explicitly closed before atomic replacement; a plain
+`with sqlite3.connect(...)` commits or rolls back but does not close the connection.
+
+The GUI checks once every five minutes while it is running. It creates at most one
+scheduled snapshot per local calendar day. `Back Up Now` and CLI `snapshot --force`
+may replace today's snapshot. The primary destination is `state/snapshots`; an
+optional mirror is configured by `snapshot_mirror_dir`.
+
 Current concurrency behavior:
 
 ```text
@@ -157,7 +173,7 @@ Watch mode is a local queue watcher, not a Telegram group watcher. It sees rows 
 
 ## GUI architecture
 
-`tg_media_app.py` owns Tkinter widgets only. It should not contain command-building rules that can be tested without Tkinter. It enables Windows process DPI awareness before creating the Tk root, then sets Tk scaling from `winfo_fpixels("1i")`; keep this order to avoid blurred rendering on 4K/high-scaling Windows displays.
+`tg_media_app.py` owns Tkinter widgets only. It should not contain command-building rules that can be tested without Tkinter. It enables Windows process DPI awareness before creating the Tk root, then sets Tk scaling from `winfo_fpixels("1i")`; keep this order to avoid blurred rendering on 4K/high-scaling Windows displays. Window geometry and minimum size must also be multiplied by `pixels_per_inch / 96`, then capped to the current screen. Scaling fonts without scaling the physical window makes a nominal 1280 px window only about 854 logical px wide at 150% DPI and clips the right-side controls.
 
 The GUI uses this page structure:
 
@@ -165,7 +181,7 @@ The GUI uses this page structure:
 Dashboard -> archive root, local state, quick actions
 Download  -> date/type/limit/workers and download commands
 Account   -> login, chat selection, indexing
-Settings  -> language, theme, watchdog, polling, startup, close behavior, archive root
+Settings  -> language, theme, watchdog, polling, daily snapshot, startup, close behavior
 Help      -> docs, about, logs, command copy
 ```
 
@@ -206,7 +222,7 @@ UI preferences are stored in:
 %APPDATA%\TelegramMediaArchive\settings.json
 ```
 
-This file stores only UI preferences: language, theme, default workers, archive root, startup setting, close behavior, watchdog setting, polling setting, and polling interval. It must not store Telegram sessions, databases, or downloaded media.
+This file stores only UI preferences: language, theme, default workers, archive root, startup setting, close behavior, watchdog setting, polling setting, polling interval, and snapshot settings. It must not store Telegram sessions, databases, or downloaded media.
 
 Current settings keys:
 
@@ -220,7 +236,9 @@ Current settings keys:
   "close_to_background": true,
   "watchdog_enabled": true,
   "poll_pending": false,
-  "poll_interval": "300"
+  "poll_interval": "300",
+  "daily_backup_enabled": true,
+  "snapshot_mirror_dir": "D:\\Cloud Storage\\Openlist\\state-backups"
 }
 ```
 
@@ -288,9 +306,9 @@ Build:
 Expected output:
 
 ```text
-release/TelegramMediaArchive-0.1.2-windows-x86_64/
-release/TelegramMediaArchive-0.1.2-windows-x86_64.zip
-release/TelegramMediaArchive-0.1.2-source.zip
+release/TelegramMediaArchive-0.1.3-windows-x86_64/
+release/TelegramMediaArchive-0.1.3-windows-x86_64.zip
+release/TelegramMediaArchive-0.1.3-source.zip
 ```
 
 The portable folder must include:
@@ -325,7 +343,7 @@ Then add hidden imports to `scripts/build_release.ps1`.
 
 ## Manual smoke test after packaging
 
-1. Open `release\TelegramMediaArchive-0.1.2-windows-x86_64\TelegramMediaArchive.exe`.
+1. Open `release\TelegramMediaArchive-0.1.3-windows-x86_64\TelegramMediaArchive.exe`.
 2. Switch language to English and back to Chinese.
 3. Toggle dark mode.
 4. Visit each left navigation page and check that the buttons match the page purpose.
@@ -339,7 +357,7 @@ Then add hidden imports to `scripts/build_release.ps1`.
 12. Run:
 
    ```powershell
-   .\release\TelegramMediaArchive-0.1.2-windows-x86_64\TelegramMediaArchiveCLI.exe --help
+   .\release\TelegramMediaArchive-0.1.3-windows-x86_64\TelegramMediaArchiveCLI.exe --help
    ```
 
 Do not run login against a maintainer's personal account during generic release verification.

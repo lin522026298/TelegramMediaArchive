@@ -160,6 +160,46 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertEqual(pending, [])
         self.assertEqual(downloaded, ("downloaded", "media/photo.jpg", 2048))
 
+    def test_archive_db_does_not_redownload_archived_media(self):
+        app = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "archive.sqlite3"
+            db = app.ArchiveDB(db_path)
+            record = app.MediaRecord(
+                chat_id=123,
+                message_id=789,
+                media_index=0,
+                date_utc=datetime(2023, 9, 1, 16, 30, tzinfo=timezone.utc),
+                kind="video",
+                file_name="archived.mp4",
+                size=4096,
+            )
+            db.upsert_media(record)
+            db.mark_downloaded(record.key, "media/archived.mp4", 4096)
+            db.conn.execute(
+                "update media set status='archived' where chat_id=? and message_id=? and media_index=?",
+                (123, 789, 0),
+            )
+            db.conn.commit()
+
+            pending = db.list_pending()
+            db.upsert_media(record)
+            pending_after_reindex = db.list_pending()
+            db.close()
+
+        self.assertEqual(pending, [])
+        self.assertEqual(pending_after_reindex, [])
+
+    def test_cloud_backpressure_flag_lives_in_archive_state(self):
+        app = load_module()
+
+        result = app.cloud_backpressure_path(Path(r"E:\archive"))
+
+        self.assertEqual(
+            result,
+            Path(r"E:\archive") / "state" / "cloud-backpressure.pause",
+        )
+
     def test_month_summary_counts_media_by_local_month(self):
         app = load_module()
         tz = ZoneInfo("Asia/Shanghai")
