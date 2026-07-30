@@ -1,0 +1,27 @@
+# 这是结构示例，不是可运行配置，也不得在 Git 中填写真实口令或令牌。
+# 实际文件：D:\Cloud Storage\Openlist\config\rclone.conf
+#
+# 数据流：
+# baidu_crypt -> baidu_chunks -> openlist_webdav -> OpenList -> 百度网盘
+
+[openlist_webdav]
+type = webdav
+url = http://127.0.0.1:5244/dav/baidu-encrypted-archive/
+vendor = other
+bearer_token = <OpenList 永久令牌；实际值不得进入 Git>
+
+[baidu_chunks]
+type = chunker
+remote = openlist_webdav:/TelegramMediaArchiveEncrypted-v1
+chunk_size = 256Mi
+hash_type = md5all
+meta_format = simplejson
+transactions = rename
+
+[baidu_crypt]
+type = crypt
+remote = baidu_chunks:
+password = <由 rclone obscure 生成>
+password2 = <由 rclone obscure 生成>
+filename_encryption = standard
+directory_name_encryption = true

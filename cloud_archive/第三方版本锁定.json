@@ -1,0 +1,17 @@
+{
+  "updated_at": "2026-07-31",
+  "openlist": {
+    "version": "v4.2.4",
+    "asset": "openlist-windows-amd64.zip",
+    "url": "https://github.com/OpenListTeam/OpenList/releases/download/v4.2.4/openlist-windows-amd64.zip",
+    "sha256": "48e6e6dac68a46a25b04882c048c9bd8e70087910ac998145a73ce2776c58e4a",
+    "license": "AGPL-3.0"
+  },
+  "rclone": {
+    "version": "v1.74.4",
+    "asset": "rclone-v1.74.4-windows-amd64.zip",
+    "url": "https://github.com/rclone/rclone/releases/download/v1.74.4/rclone-v1.74.4-windows-amd64.zip",
+    "sha256": "ef097ef9de37a57feb7d9f9c7afb34148ad3c65be8025f1d8f7f521554a701ea",
+    "license": "MIT"
+  }
+}

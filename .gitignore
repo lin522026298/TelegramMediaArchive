@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 build/
 dist/
+build-cloud-uploader/
+dist-cloud-uploader/
 release/
 *.spec
 docs/superpowers/
