@@ -33,7 +33,9 @@ DEFAULT_CHUNK_SIZE = 512 * 1024
 DEFAULT_LIMIT = None
 DEFAULT_MIN_FREE_GB = 50
 DEFAULT_POLL_INTERVAL_SECONDS = 300
+DEFAULT_INDEX_INTERVAL_SECONDS = 300
 BACKPRESSURE_FLAG_NAME = "cloud-backpressure.pause"
+SYNC_STOP_FILE_NAME = "STOP_TELEGRAM_SYNC"
 CONFIG_NAME = "config.json"
 DB_NAME = "archive.sqlite3"
 SESSION_NAME = "telegram_media_archive"
@@ -355,6 +357,13 @@ class ArchiveDB:
         rows = self.conn.execute("select status, count(*) count from media group by status").fetchall()
         return {row["status"]: row["count"] for row in rows}
 
+    def latest_message_id(self, chat_id: int) -> int:
+        row = self.conn.execute(
+            "select coalesce(max(message_id), 0) from media where chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+        return int(row[0])
+
     def month_summary(self, tz: ZoneInfo) -> list[MonthSummary]:
         rows = self.conn.execute(
             "select date_utc, kind, coalesce(size, 0) size from media order by date_utc"
@@ -408,6 +417,10 @@ def session_path(root: Path) -> Path:
 
 def cloud_backpressure_path(root: Path) -> Path:
     return state_dir(root) / BACKPRESSURE_FLAG_NAME
+
+
+def sync_stop_path(root: Path) -> Path:
+    return state_dir(root) / SYNC_STOP_FILE_NAME
 
 
 def ensure_layout(root: Path) -> None:
@@ -573,26 +586,106 @@ async def get_configured_entity(client: Any, root: Path, config: dict[str, Any])
     return await client.get_entity(int(config["chat_id"]))
 
 
-async def index_media(root: Path, limit: int | None = DEFAULT_LIMIT) -> None:
+async def index_media_messages(
+    client: Any,
+    entity: Any,
+    db: ArchiveDB,
+    chat_id: int,
+    *,
+    limit: int | None = DEFAULT_LIMIT,
+    min_id: int = 0,
+) -> int:
+    count = 0
+    arguments: dict[str, Any] = {
+        "limit": limit,
+        "reverse": True,
+        "filter": media_message_filter(),
+    }
+    if min_id > 0:
+        arguments["min_id"] = min_id
+    async for message in client.iter_messages(entity, **arguments):
+        record = message_media_record(chat_id, message)
+        if record is None:
+            continue
+        db.upsert_media(record)
+        count += 1
+        if count % 100 == 0:
+            print(f"Indexed {count} media messages...")
+    return count
+
+
+def refresh_chat_metadata(root: Path, config: dict[str, Any], entity: Any) -> None:
+    title = str(getattr(entity, "title", "") or getattr(entity, "first_name", "") or "").strip()
+    if title and title != config.get("chat_title"):
+        config["chat_title"] = title
+        save_config(root, config)
+        print(f"Updated selected chat title: {title}")
+
+
+async def index_media(
+    root: Path,
+    limit: int | None = DEFAULT_LIMIT,
+    *,
+    new_only: bool = False,
+) -> None:
     client, config = await create_client(root)
     db = ArchiveDB(db_path(root))
-    count = 0
     try:
         entity = await get_configured_entity(client, root, config)
         chat_id = int(config["chat_id"])
-        print(f"Indexing media from: {config.get('chat_title', chat_id)}")
-        async for message in client.iter_messages(entity, limit=limit, reverse=True, filter=media_message_filter()):
-            record = message_media_record(chat_id, message)
-            if record is None:
-                continue
-            db.upsert_media(record)
-            count += 1
-            if count % 100 == 0:
-                print(f"Indexed {count} media messages...")
+        refresh_chat_metadata(root, config, entity)
+        min_id = db.latest_message_id(chat_id) if new_only else 0
+        mode = f"new media after message {min_id}" if new_only else "all media"
+        print(f"Indexing {mode} from: {config.get('chat_title', chat_id)}")
+        count = await index_media_messages(
+            client,
+            entity,
+            db,
+            chat_id,
+            limit=limit,
+            min_id=min_id,
+        )
         print(f"Indexed {count} media messages.")
     finally:
         db.close()
         await client.disconnect()
+
+
+async def wait_with_stop_check(root: Path, seconds: int) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if sync_stop_path(root).exists():
+            return True
+        await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    return sync_stop_path(root).exists()
+
+
+async def incremental_index_loop(
+    client: Any,
+    entity: Any,
+    db: ArchiveDB,
+    root: Path,
+    chat_id: int,
+    interval: int,
+) -> None:
+    while not sync_stop_path(root).exists():
+        min_id = db.latest_message_id(chat_id)
+        try:
+            print(f"Checking for new group media after message {min_id}...")
+            indexed = await index_media_messages(
+                client,
+                entity,
+                db,
+                chat_id,
+                min_id=min_id,
+            )
+            print(f"Incremental index added {indexed} media messages.")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"Incremental index failed; retrying later: {type(exc).__name__}: {exc}")
+        if await wait_with_stop_check(root, interval):
+            break
 
 
 async def list_chats(root: Path) -> None:
@@ -670,6 +763,12 @@ async def download_one(
                     continue
                 handle.write(chunk)
                 downloaded += len(chunk)
+                if sync_stop_path(root).exists():
+                    handle.flush()
+                    downloaded_on_disk = part_path.stat().st_size
+                    db.mark_downloading(record.key, rel_path.as_posix(), downloaded_on_disk)
+                    print(f"stop requested; kept resumable part {rel_path}")
+                    return False
                 now = time.monotonic()
                 if now - last_print >= 5:
                     handle.flush()
@@ -705,19 +804,37 @@ async def download_media(
     workers: int = 1,
     watch: bool = False,
     poll_interval: int = DEFAULT_POLL_INTERVAL_SECONDS,
+    sync_new: bool = False,
+    index_interval: int = DEFAULT_INDEX_INTERVAL_SECONDS,
 ) -> None:
     if workers < 1:
         raise SystemExit("--workers must be at least 1")
     if poll_interval < 10:
         raise SystemExit("--poll-interval must be at least 10 seconds")
+    if index_interval < 10:
+        raise SystemExit("--index-interval must be at least 10 seconds")
+    if sync_new and not watch:
+        raise SystemExit("--sync-new requires --watch")
     client, config = await create_client(root)
     db = ArchiveDB(db_path(root))
     tz = ZoneInfo(str(config.get("timezone", DEFAULT_TIMEZONE)))
     start_utc, end_utc = parse_date_bounds(start, end, tz)
     try:
         entity = await get_configured_entity(client, root, config)
+        chat_id = int(config["chat_id"])
+        refresh_chat_metadata(root, config, entity)
         min_free_bytes = int(min_free_gb * 1024**3)
+        index_task = (
+            asyncio.create_task(incremental_index_loop(client, entity, db, root, chat_id, index_interval))
+            if sync_new
+            else None
+        )
         while True:
+            stop_file = sync_stop_path(root)
+            if stop_file.exists():
+                print(f"Continuous sync stop requested: {stop_file}")
+                break
+
             backpressure = cloud_backpressure_path(root)
             if backpressure.exists():
                 print(
@@ -726,7 +843,8 @@ async def download_media(
                 )
                 if not watch:
                     break
-                await asyncio.sleep(poll_interval)
+                if await wait_with_stop_check(root, poll_interval):
+                    break
                 continue
 
             records = db.list_pending(start_utc=start_utc, end_utc=end_utc, kind=kind, include_errors=True, limit=limit)
@@ -735,12 +853,16 @@ async def download_media(
                 if not watch:
                     break
                 print(f"No pending records. Waiting {poll_interval} seconds before polling again.")
-                await asyncio.sleep(poll_interval)
+                if await wait_with_stop_check(root, poll_interval):
+                    break
                 continue
 
             stopped_for_space = False
             stopped_for_backpressure = False
             for batch in batch_records(records, workers):
+                if stop_file.exists():
+                    print("Continuous sync stop requested before the next batch.")
+                    return
                 if backpressure.exists():
                     print(
                         "Cloud archive backpressure became active. "
@@ -762,6 +884,9 @@ async def download_media(
                     *(download_one(client, entity, root, tz, db, record, chunk_size) for record in batch),
                     return_exceptions=True,
                 )
+                if stop_file.exists():
+                    print("Continuous sync stopped; .part files remain resumable.")
+                    return
                 if any(result is not True for result in results):
                     await asyncio.sleep(2)
 
@@ -772,11 +897,19 @@ async def download_media(
                     f"Encrypted upload is draining the local queue. "
                     f"Waiting {poll_interval} seconds before checking again."
                 )
-                await asyncio.sleep(poll_interval)
+                if await wait_with_stop_check(root, poll_interval):
+                    break
                 continue
             print(f"Download pass complete. Waiting {poll_interval} seconds before polling again.")
-            await asyncio.sleep(poll_interval)
+            if await wait_with_stop_check(root, poll_interval):
+                break
     finally:
+        if "index_task" in locals() and index_task is not None:
+            index_task.cancel()
+            try:
+                await index_task
+            except asyncio.CancelledError:
+                pass
         db.close()
         await client.disconnect()
 
@@ -792,18 +925,43 @@ def run_download_command(
     workers: int,
     watch: bool,
     poll_interval: int,
+    sync_new: bool = False,
+    index_interval: int = DEFAULT_INDEX_INTERVAL_SECONDS,
 ) -> int:
     while True:
         try:
-            asyncio.run(download_media(root, start, end, kind, limit, chunk_size, min_free_gb, workers, watch, poll_interval))
+            asyncio.run(
+                download_media(
+                    root,
+                    start,
+                    end,
+                    kind,
+                    limit,
+                    chunk_size,
+                    min_free_gb,
+                    workers,
+                    watch,
+                    poll_interval,
+                    sync_new,
+                    index_interval,
+                )
+            )
             return 0
         except KeyboardInterrupt:
             raise
         except Exception as exc:
             if not watch:
                 raise
+            if sync_stop_path(root).exists():
+                print("Continuous sync stop requested after a download-loop error.")
+                return 0
             print(f"Download loop failed and will restart in {poll_interval} seconds: {type(exc).__name__}: {exc}", file=sys.stderr)
-            time.sleep(poll_interval)
+            retry_at = time.monotonic() + poll_interval
+            while time.monotonic() < retry_at:
+                if sync_stop_path(root).exists():
+                    print("Continuous sync stop requested during the retry wait.")
+                    return 0
+                time.sleep(min(1.0, max(0.0, retry_at - time.monotonic())))
 
 
 def print_summary(root: Path, timezone_name: str = DEFAULT_TIMEZONE) -> None:
@@ -977,6 +1135,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     index = sub.add_parser("index", help="Index media messages into SQLite")
     index.add_argument("--limit", type=int, default=None)
+    index.add_argument("--new-only", action="store_true", help="Index only media newer than the local database")
 
     summary = sub.add_parser("summary", help="Show indexed media by month")
     summary.add_argument("--timezone", default=DEFAULT_TIMEZONE)
@@ -991,6 +1150,8 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--workers", type=int, default=1)
     download.add_argument("--watch", action="store_true", help="Keep polling the local pending list after each pass")
     download.add_argument("--poll-interval", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS, help="Seconds to wait between watch polls")
+    download.add_argument("--sync-new", action="store_true", help="Continuously index newly posted group media while downloading")
+    download.add_argument("--index-interval", type=int, default=DEFAULT_INDEX_INTERVAL_SECONDS, help="Seconds between incremental group index checks")
 
     resume = sub.add_parser("resume", help="Resume all pending downloads")
     resume.add_argument("--limit", type=int, default=None)
@@ -999,6 +1160,8 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--workers", type=int, default=1)
     resume.add_argument("--watch", action="store_true", help="Keep polling the local pending list after each pass")
     resume.add_argument("--poll-interval", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS, help="Seconds to wait between watch polls")
+    resume.add_argument("--sync-new", action="store_true", help="Continuously index newly posted group media while downloading")
+    resume.add_argument("--index-interval", type=int, default=DEFAULT_INDEX_INTERVAL_SECONDS, help="Seconds between incremental group index checks")
 
     verify = sub.add_parser("verify", help="Verify downloaded files")
     verify.add_argument("--repair", action="store_true")
@@ -1027,7 +1190,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif command == "select-chat":
         asyncio.run(select_chat(root))
     elif command == "index":
-        asyncio.run(index_media(root, limit=args.limit))
+        asyncio.run(index_media(root, limit=args.limit, new_only=args.new_only))
     elif command == "summary":
         print_summary(root, timezone_name=args.timezone)
     elif command == "download":
@@ -1042,6 +1205,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.workers,
             args.watch,
             args.poll_interval,
+            args.sync_new,
+            args.index_interval,
         )
     elif command == "resume":
         return run_download_command(
@@ -1055,6 +1220,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.workers,
             args.watch,
             args.poll_interval,
+            args.sync_new,
+            args.index_interval,
         )
     elif command == "verify":
         return verify_archive(root, repair=args.repair)

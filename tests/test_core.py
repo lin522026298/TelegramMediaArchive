@@ -1,4 +1,5 @@
 import importlib
+import asyncio
 import sqlite3
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from unittest.mock import patch
 
 
 def load_module():
@@ -131,6 +133,24 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertTrue(args.watch)
         self.assertEqual(args.poll_interval, 120)
 
+    def test_resume_parser_accepts_continuous_incremental_index_options(self):
+        app = load_module()
+
+        args = app.build_parser().parse_args(
+            ["resume", "--watch", "--sync-new", "--index-interval", "90"]
+        )
+
+        self.assertTrue(args.watch)
+        self.assertTrue(args.sync_new)
+        self.assertEqual(args.index_interval, 90)
+
+    def test_index_parser_accepts_new_only(self):
+        app = load_module()
+
+        args = app.build_parser().parse_args(["index", "--new-only"])
+
+        self.assertTrue(args.new_only)
+
     def test_archive_db_preserves_downloaded_status_when_reindexing_same_media(self):
         app = load_module()
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,6 +219,77 @@ class CoreBehaviorTests(unittest.TestCase):
             result,
             Path(r"E:\archive") / "state" / "cloud-backpressure.pause",
         )
+
+    def test_sync_stop_flag_lives_in_archive_state(self):
+        app = load_module()
+
+        self.assertEqual(
+            app.sync_stop_path(Path(r"E:\archive")),
+            Path(r"E:\archive") / "state" / "STOP_TELEGRAM_SYNC",
+        )
+
+    def test_watch_retry_exits_cleanly_when_safe_stop_was_requested(self):
+        app = load_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app.ensure_layout(root)
+            app.sync_stop_path(root).write_text("stop\n", encoding="utf-8")
+            with patch.object(app, "download_media", side_effect=RuntimeError("network failed")):
+                result = app.run_download_command(
+                    root,
+                    None,
+                    None,
+                    "all",
+                    None,
+                    app.DEFAULT_CHUNK_SIZE,
+                    app.DEFAULT_MIN_FREE_GB,
+                    1,
+                    True,
+                    300,
+                    True,
+                    300,
+                )
+
+        self.assertEqual(result, 0)
+
+    def test_latest_message_id_and_incremental_index_min_id(self):
+        app = load_module()
+
+        class FakeClient:
+            def __init__(self):
+                self.arguments = None
+
+            async def iter_messages(self, _entity, **arguments):
+                self.arguments = arguments
+                if False:
+                    yield None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = app.ArchiveDB(Path(tmp) / "archive.sqlite3")
+            for message_id in (10, 25, 18):
+                db.upsert_media(
+                    app.MediaRecord(
+                        123,
+                        message_id,
+                        0,
+                        datetime(2023, 1, 1, tzinfo=timezone.utc),
+                        "photo",
+                        f"{message_id}.jpg",
+                        1,
+                    )
+                )
+            latest = db.latest_message_id(123)
+            client = FakeClient()
+            count = asyncio.run(
+                app.index_media_messages(client, object(), db, 123, min_id=latest)
+            )
+            db.close()
+
+        self.assertEqual(latest, 25)
+        self.assertEqual(count, 0)
+        self.assertEqual(client.arguments["min_id"], 25)
+        self.assertTrue(client.arguments["reverse"])
 
     def test_month_summary_counts_media_by_local_month(self):
         app = load_module()

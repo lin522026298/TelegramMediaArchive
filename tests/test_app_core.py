@@ -92,6 +92,37 @@ class AppCoreTests(unittest.TestCase):
             ],
         )
 
+    def test_build_resume_command_enables_same_session_incremental_index(self):
+        core = load_module()
+        options = core.AppOptions(
+            root=Path(r"E:\archive"),
+            script_path=Path(r"C:\work\tg_media_archive.py"),
+            python_exe=Path(sys.executable),
+        )
+
+        command = core.build_command(
+            options,
+            "resume",
+            workers="3",
+            sync_new=True,
+            poll_interval="120",
+            index_interval="90",
+        )
+
+        self.assertEqual(
+            command[-8:],
+            [
+                "--workers",
+                "3",
+                "--watch",
+                "--poll-interval",
+                "120",
+                "--sync-new",
+                "--index-interval",
+                "90",
+            ],
+        )
+
     def test_build_command_uses_frozen_cli_exe_when_configured(self):
         core = load_module()
         options = core.AppOptions(
@@ -133,6 +164,8 @@ class AppCoreTests(unittest.TestCase):
             "watchdog_enabled",
             "poll_pending",
             "poll_interval",
+            "sync_new_media",
+            "index_interval",
             "daily_backup_enabled",
             "snapshot_mirror_dir",
             "backup_now",
@@ -160,6 +193,8 @@ class AppCoreTests(unittest.TestCase):
                 watchdog_enabled=False,
                 poll_pending=True,
                 poll_interval="120",
+                sync_new_media=True,
+                index_interval="90",
                 daily_backup_enabled=False,
                 snapshot_mirror_dir=str(Path(r"D:\Cloud Storage\Openlist\state-backups")),
             )
@@ -186,6 +221,8 @@ class AppCoreTests(unittest.TestCase):
         self.assertTrue(loaded.watchdog_enabled)
         self.assertFalse(loaded.poll_pending)
         self.assertEqual(loaded.poll_interval, "300")
+        self.assertFalse(loaded.sync_new_media)
+        self.assertEqual(loaded.index_interval, "300")
         self.assertTrue(loaded.daily_backup_enabled)
         self.assertEqual(loaded.snapshot_mirror_dir, "")
 
@@ -266,6 +303,10 @@ class AppCoreTests(unittest.TestCase):
             core.validate_poll_interval("0")
         with self.assertRaisesRegex(ValueError, "poll interval"):
             core.validate_poll_interval("abc")
+        with self.assertRaisesRegex(ValueError, "index interval"):
+            core.validate_index_interval("0")
+        with self.assertRaisesRegex(ValueError, "index interval"):
+            core.validate_index_interval("abc")
 
     def test_state_paths_are_under_selected_root_not_desktop_export(self):
         core = load_module()
@@ -276,6 +317,7 @@ class AppCoreTests(unittest.TestCase):
         self.assertEqual(paths.state_dir, root / "state")
         self.assertEqual(paths.media_dir, root / "media")
         self.assertEqual(paths.snapshots_dir, root / "state" / "snapshots")
+        self.assertEqual(paths.sync_stop_path, root / "state" / "STOP_TELEGRAM_SYNC")
         self.assertNotEqual(paths.media_dir, Path(r"E:\电报视频导出"))
 
     def test_tkinter_app_does_not_shadow_internal_options_method(self):
@@ -307,6 +349,14 @@ class AppCoreTests(unittest.TestCase):
 
         self.assertEqual(args.root, Path(r"E:\archive"))
         self.assertTrue(args.auto_resume)
+
+    def test_tkinter_app_parse_args_accepts_auto_sync(self):
+        app_module = importlib.import_module("tg_media_app")
+
+        args = app_module.parse_args(["--root", r"E:\archive", "--auto-sync"])
+
+        self.assertEqual(args.root, Path(r"E:\archive"))
+        self.assertTrue(args.auto_sync)
 
 
 if __name__ == "__main__":

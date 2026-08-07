@@ -11,11 +11,12 @@ from pathlib import Path
 from tg_media_archive import DEFAULT_ROOT
 
 
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.4"
 VALID_KINDS = {"all", "photo", "video"}
 MAX_WORKERS = 8
 DEFAULT_WORKERS = "4"
 DEFAULT_POLL_INTERVAL = "300"
+DEFAULT_INDEX_INTERVAL = "300"
 SUPPORTED_LANGUAGES = ("zh", "en")
 SUPPORTED_THEMES = ("light", "dark")
 LANGUAGE_LABELS = {"zh": "中文", "en": "English"}
@@ -66,7 +67,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "watchdog_enabled": "Restart failed downloads automatically",
         "poll_pending": "Keep polling indexed pending items",
         "poll_interval": "Poll interval (seconds)",
-        "polling_note": "Polling only rechecks the local index. Run Index Media when you want to add newly posted group media.",
+        "sync_new_media": "Automatically index newly posted group media",
+        "index_interval": "New-media check interval (seconds)",
+        "polling_note": "Pending polling rechecks local work. New-media indexing follows later group posts in the same Telegram session.",
         "daily_backup_enabled": "Create one consistent SQLite snapshot per running day",
         "snapshot_mirror_dir": "Optional snapshot mirror directory",
         "snapshot_note": "Runs only while this app is open. SQLite's backup API keeps snapshots consistent while downloads continue.",
@@ -112,6 +115,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "finished": "Finished",
         "failed": "failed",
         "stopped": "Stopped running command.",
+        "stopping_safely": "Stopping safely after the current network chunk",
+        "stop_timeout": "Safe stop timed out; terminating the command",
         "watchdog_restarting": "Download stopped unexpectedly. Restarting in 10 seconds",
         "nothing_to_stop": "No command is running.",
         "no_command": "No command has been run yet.",
@@ -173,7 +178,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "watchdog_enabled": "下载异常退出后自动重启",
         "poll_pending": "完成一轮后继续轮询已索引待下载项",
         "poll_interval": "轮询间隔（秒）",
-        "polling_note": "轮询只重新检查本地索引。需要加入群里新发的内容时，再手动运行“索引媒体”。",
+        "sync_new_media": "自动索引群组后续新发的图片和视频",
+        "index_interval": "群组新媒体检查间隔（秒）",
+        "polling_note": "待下载轮询负责本地任务；新媒体索引会在同一个 Telegram 会话中持续跟进群组后续内容。",
         "daily_backup_enabled": "应用运行期间每天创建一份 SQLite 一致性快照",
         "snapshot_mirror_dir": "快照镜像目录（可留空）",
         "snapshot_note": "仅在本应用运行时执行；使用 SQLite 正规备份接口，下载继续进行时快照仍保持一致。",
@@ -219,6 +226,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "finished": "已完成",
         "failed": "失败",
         "stopped": "已停止当前命令。",
+        "stopping_safely": "正在当前网络分块结束后安全停止",
+        "stop_timeout": "安全停止超时，正在终止命令",
         "watchdog_restarting": "下载进程异常停止，10 秒后自动重启",
         "nothing_to_stop": "当前没有正在运行的命令。",
         "no_command": "还没有运行过命令。",
@@ -249,6 +258,8 @@ class AppSettings:
     watchdog_enabled: bool = True
     poll_pending: bool = False
     poll_interval: str = DEFAULT_POLL_INTERVAL
+    sync_new_media: bool = False
+    index_interval: str = DEFAULT_INDEX_INTERVAL
     daily_backup_enabled: bool = True
     snapshot_mirror_dir: str = ""
 
@@ -270,6 +281,7 @@ class ArchivePaths:
     config_path: Path
     db_path: Path
     snapshots_dir: Path
+    sync_stop_path: Path
 
 
 def archive_paths(root: Path) -> ArchivePaths:
@@ -281,6 +293,7 @@ def archive_paths(root: Path) -> ArchivePaths:
         config_path=root / "state" / "config.json",
         db_path=root / "state" / "archive.sqlite3",
         snapshots_dir=root / "state" / "snapshots",
+        sync_stop_path=root / "state" / "STOP_TELEGRAM_SYNC",
     )
 
 
@@ -338,6 +351,18 @@ def validate_poll_interval(value: str) -> None:
         raise ValueError("poll interval must be at least 10 seconds")
 
 
+def validate_index_interval(value: str) -> None:
+    text = value.strip()
+    if not text:
+        return
+    try:
+        seconds = int(text)
+    except ValueError as exc:
+        raise ValueError("index interval must be a positive integer") from exc
+    if seconds < 10:
+        raise ValueError("index interval must be at least 10 seconds")
+
+
 def _valid_workers_or_default(value: str) -> str:
     try:
         validate_workers(value)
@@ -352,6 +377,14 @@ def _valid_poll_interval_or_default(value: str) -> str:
     except ValueError:
         return DEFAULT_POLL_INTERVAL
     return value.strip() or DEFAULT_POLL_INTERVAL
+
+
+def _valid_index_interval_or_default(value: str) -> str:
+    try:
+        validate_index_interval(value)
+    except ValueError:
+        return DEFAULT_INDEX_INTERVAL
+    return value.strip() or DEFAULT_INDEX_INTERVAL
 
 
 def _bool_from_value(value: object, default: bool = False) -> bool:
@@ -371,6 +404,7 @@ def normalize_settings(settings: AppSettings) -> AppSettings:
     theme = settings.theme if settings.theme in SUPPORTED_THEMES else "light"
     workers = _valid_workers_or_default(settings.workers)
     poll_interval = _valid_poll_interval_or_default(settings.poll_interval)
+    index_interval = _valid_index_interval_or_default(settings.index_interval)
     root = settings.root.strip() or str(DEFAULT_ROOT)
     return AppSettings(
         language=language,
@@ -382,6 +416,8 @@ def normalize_settings(settings: AppSettings) -> AppSettings:
         watchdog_enabled=_bool_from_value(settings.watchdog_enabled, True),
         poll_pending=_bool_from_value(settings.poll_pending, False),
         poll_interval=poll_interval,
+        sync_new_media=_bool_from_value(settings.sync_new_media, False),
+        index_interval=index_interval,
         daily_backup_enabled=_bool_from_value(settings.daily_backup_enabled, True),
         snapshot_mirror_dir=settings.snapshot_mirror_dir.strip(),
     )
@@ -404,6 +440,8 @@ def load_app_settings(path: Path | None = None) -> AppSettings:
             watchdog_enabled=_bool_from_value(data.get("watchdog_enabled"), True),
             poll_pending=_bool_from_value(data.get("poll_pending"), False),
             poll_interval=str(data.get("poll_interval", DEFAULT_POLL_INTERVAL)),
+            sync_new_media=_bool_from_value(data.get("sync_new_media"), False),
+            index_interval=str(data.get("index_interval", DEFAULT_INDEX_INTERVAL)),
             daily_backup_enabled=_bool_from_value(data.get("daily_backup_enabled"), True),
             snapshot_mirror_dir=str(data.get("snapshot_mirror_dir", "")),
         )
@@ -484,6 +522,9 @@ def build_command(
     phone: str = "",
     watch: bool = False,
     poll_interval: str = "",
+    sync_new: bool = False,
+    index_interval: str = "",
+    new_only: bool = False,
 ) -> list[str]:
     if options.cli_exe is not None:
         command = [str(options.cli_exe), "--root", str(options.root), action]
@@ -507,11 +548,17 @@ def build_command(
         if workers.strip():
             command.extend(["--workers", workers.strip()])
         validate_poll_interval(poll_interval)
-        if watch:
+        validate_index_interval(index_interval)
+        effective_watch = watch or sync_new
+        if effective_watch:
             command.append("--watch")
             if poll_interval.strip():
                 command.extend(["--poll-interval", poll_interval.strip()])
-    elif action in {"index", "resume"}:
+        if sync_new:
+            command.append("--sync-new")
+            if index_interval.strip():
+                command.extend(["--index-interval", index_interval.strip()])
+    elif action == "resume":
         if limit.strip():
             validate_download_options("", "", "all", limit)
             command.extend(["--limit", limit.strip()])
@@ -519,10 +566,22 @@ def build_command(
         if workers.strip():
             command.extend(["--workers", workers.strip()])
         validate_poll_interval(poll_interval)
-        if watch:
+        validate_index_interval(index_interval)
+        effective_watch = watch or sync_new
+        if effective_watch:
             command.append("--watch")
             if poll_interval.strip():
                 command.extend(["--poll-interval", poll_interval.strip()])
+        if sync_new:
+            command.append("--sync-new")
+            if index_interval.strip():
+                command.extend(["--index-interval", index_interval.strip()])
+    elif action == "index":
+        if limit.strip():
+            validate_download_options("", "", "all", limit)
+            command.extend(["--limit", limit.strip()])
+        if new_only:
+            command.append("--new-only")
     elif action == "login-official":
         if not phone.strip():
             raise ValueError("phone is required for login-official")

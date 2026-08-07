@@ -1,6 +1,6 @@
 ﻿# Telegram 群媒体可断点下载器
 
-这个仓库提供一个纯 Python 桌面 App 和 CLI，用 Telegram API 归档群组里的图片和视频。它支持断点续传、并发下载、下载异常守护、可选本地队列轮询、每日 SQLite 一致性快照、中英文界面、明/暗色主题、高 DPI 适配、帮助文档入口、开机自启动和 Windows x86_64 便携打包。
+这个仓库提供一个纯 Python 桌面 App 和 CLI，用 Telegram API 归档群组里的图片和视频。它支持断点续传、有序并发下载、本地任务轮询、同会话增量索引群组新媒体、下载异常守护、每日 SQLite 一致性快照、中英文界面、明/暗色主题、高 DPI 适配、帮助文档入口和 Windows x86_64 便携打包。
 
 仓库还包含可选的 `TelegramCloudUploader` 侧车。它不替换 Telegram 下载内核，而是把已经完成的正式文件按顺序交给 `rclone crypt -> chunker -> OpenList -> 百度网盘`，完成内容与名称加密、云端校验和可恢复的本地清理。部署、恢复和安全约束见 [cloud_archive/使用说明（中文）.md](cloud_archive/使用说明（中文）.md)。
 
@@ -48,6 +48,7 @@ python tg_media_app.py
 - `关闭窗口时后台保留` / `Close window to background`：关闭按钮隐藏窗口，下载任务不因此中断。
 - `下载异常退出后自动重启` / `Restart failed downloads automatically`：从 APP 启动的下载命令异常退出时，10 秒后自动用上一条下载命令重启。
 - `完成一轮后继续轮询已索引待下载项` / `Keep polling indexed pending items`：下载一轮结束后继续检查本地 SQLite 中已经索引的待下载项。
+- `自动索引群组后续新发的图片和视频`：在下载使用的同一个 Telegram 会话内定时执行增量索引，不启动第二个会话进程。
 - `应用运行期间每天创建一份 SQLite 一致性快照`：使用 SQLite 正规备份接口，不需要暂停正在进行的下载；可选镜像到第二个磁盘目录。
 - `立即备份` / `Back Up Now`：原子刷新当天快照并执行完整性检查。
 - `帮助文档` / `Help`：打开面向普通用户的帮助。
@@ -65,7 +66,7 @@ python tg_media_app.py
 
 `Download options` 里的 `Workers` 控制下载并发数，App 默认 4，允许 1-8。首次登录和选群仍使用交互式终端，是为了验证码、二步验证密码、群选择等输入流程保持可靠；索引和下载会在 App 日志面板中显示进度。
 
-轮询只重新检查本地数据库里已经存在的记录，不会自动把群组中新发的内容加入队列。需要加入新消息时，手动运行 `Index Media`。
+本地待下载轮询和群组新媒体索引是两个独立开关。只开前者时不会访问群组新消息；打开后者时，程序按数据库最高 `message_id` 增量加入新图片/视频，并自动保持 watch 模式。
 
 ## 文档
 
@@ -146,6 +147,14 @@ python tg_media_archive.py resume --workers 4
 python tg_media_archive.py resume --workers 3 --watch --poll-interval 300
 ```
 
+持续跟进群组更新，同时下载全部存量与新增媒体：
+
+```powershell
+python tg_media_archive.py resume --workers 3 --watch --poll-interval 300 --sync-new --index-interval 300
+```
+
+`--sync-new` 的索引协程和下载协程共享同一个 Telethon 客户端和 `.session`，不会用两个进程争抢会话文件。安全停止通过 `<归档目录>\state\STOP_TELEGRAM_SYNC` 请求；下一次由 APP 启动下载时会自动移除旧停止标记。
+
 并发下载按数据库里的消息时间和消息 ID 分批调度，例如 `--workers 4` 会同时处理当前顺序里的 4 个文件，等这一批结束后再进入下一批。每个文件写入独立的 `.part` 文件，完成后再原子重命名为正式文件；断点续传按磁盘上实际 `.part` 大小恢复，不依赖日志里的进度数字。
 
 检查已下载文件是否缺失或大小不符：
@@ -185,9 +194,9 @@ python -m venv .venv
 输出文件：
 
 ```text
-release\TelegramMediaArchive-0.1.3-source.zip
-release\TelegramMediaArchive-0.1.3-windows-x86_64.zip
-release\TelegramMediaArchive-0.1.3-windows-x86_64\
+release\TelegramMediaArchive-0.1.4-source.zip
+release\TelegramMediaArchive-0.1.4-windows-x86_64.zip
+release\TelegramMediaArchive-0.1.4-windows-x86_64\
 ```
 
 便携包里包含：

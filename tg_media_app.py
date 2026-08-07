@@ -29,6 +29,7 @@ from tg_media_app_core import (
     status_lines,
     translate,
     validate_download_options,
+    validate_index_interval,
     validate_poll_interval,
     window_dimensions,
 )
@@ -94,6 +95,8 @@ class TelegramArchiveApp(tk.Tk):
         self.watchdog_var = tk.BooleanVar(value=self.settings.watchdog_enabled)
         self.poll_pending_var = tk.BooleanVar(value=self.settings.poll_pending)
         self.poll_interval_var = tk.StringVar(value=self.settings.poll_interval)
+        self.sync_new_var = tk.BooleanVar(value=self.settings.sync_new_media)
+        self.index_interval_var = tk.StringVar(value=self.settings.index_interval)
         self.daily_backup_var = tk.BooleanVar(value=self.settings.daily_backup_enabled)
         self.snapshot_mirror_var = tk.StringVar(value=self.settings.snapshot_mirror_dir)
         self.from_var = tk.StringVar()
@@ -104,6 +107,7 @@ class TelegramArchiveApp(tk.Tk):
         self.phone_var = tk.StringVar(value="+10000000000")
         self.status_var = tk.StringVar(value=self._t("ready"))
         self.process: subprocess.Popen[str] | None = None
+        self._running_label: str | None = None
         self._stop_requested = False
         self.output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.last_command: list[str] | None = None
@@ -364,9 +368,13 @@ class TelegramArchiveApp(tk.Tk):
         self._register_text(ttk.Checkbutton(automation, variable=self.poll_pending_var, command=self._save_settings), "poll_pending").grid(
             row=2, column=0, columnspan=2, sticky="w", pady=4
         )
-        self._label_entry(automation, "poll_interval", self.poll_interval_var, 3, 0, colspan=2)
+        self._register_text(ttk.Checkbutton(automation, variable=self.sync_new_var, command=self._save_settings), "sync_new_media").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=4
+        )
+        self._label_entry(automation, "poll_interval", self.poll_interval_var, 4, 0)
+        self._label_entry(automation, "index_interval", self.index_interval_var, 4, 1)
         self._register_text(ttk.Label(automation, style="Muted.TLabel"), "polling_note").grid(
-            row=5, column=0, columnspan=2, sticky="w", pady=(0, 4)
+            row=6, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
 
         data_safety = self._card(parent, "data_safety")
@@ -446,6 +454,7 @@ class TelegramArchiveApp(tk.Tk):
     def _save_settings(self) -> None:
         try:
             validate_poll_interval(self.poll_interval_var.get())
+            validate_index_interval(self.index_interval_var.get())
         except ValueError as exc:
             messagebox.showerror(self._t("invalid_options"), str(exc))
             return
@@ -459,6 +468,8 @@ class TelegramArchiveApp(tk.Tk):
             watchdog_enabled=self.watchdog_var.get(),
             poll_pending=self.poll_pending_var.get(),
             poll_interval=self.poll_interval_var.get().strip() or "300",
+            sync_new_media=self.sync_new_var.get(),
+            index_interval=self.index_interval_var.get().strip() or "300",
             daily_backup_enabled=self.daily_backup_var.get(),
             snapshot_mirror_dir=self.snapshot_mirror_var.get().strip(),
         )
@@ -475,6 +486,8 @@ class TelegramArchiveApp(tk.Tk):
         self.watchdog_var.set(True)
         self.poll_pending_var.set(False)
         self.poll_interval_var.set("300")
+        self.sync_new_var.set(False)
+        self.index_interval_var.set("300")
         self.daily_backup_var.set(True)
         self.snapshot_mirror_var.set("")
         self.workers_var.set("4")
@@ -706,7 +719,7 @@ class TelegramArchiveApp(tk.Tk):
         self._run_terminal("login-official", phone=phone)
 
     def _index_media(self) -> None:
-        self._run_logged("index", limit=self.limit_var.get())
+        self._run_logged("index", limit=self.limit_var.get(), new_only=True)
 
     def _resume_pending(self) -> None:
         self._save_settings()
@@ -714,9 +727,18 @@ class TelegramArchiveApp(tk.Tk):
             "resume",
             limit=self.limit_var.get(),
             workers=self.workers_var.get(),
-            watch=self.poll_pending_var.get(),
+            watch=self.poll_pending_var.get() or self.sync_new_var.get(),
             poll_interval=self.poll_interval_var.get(),
+            sync_new=self.sync_new_var.get(),
+            index_interval=self.index_interval_var.get(),
         )
+
+    def _start_auto_sync(self) -> None:
+        self.startup_var.set(False)
+        self.poll_pending_var.set(True)
+        self.sync_new_var.set(True)
+        self._save_settings()
+        self._resume_pending()
 
     def _download_range(self) -> None:
         try:
@@ -738,8 +760,10 @@ class TelegramArchiveApp(tk.Tk):
             kind=self.kind_var.get(),
             limit=self.limit_var.get(),
             workers=self.workers_var.get(),
-            watch=self.poll_pending_var.get(),
+            watch=self.poll_pending_var.get() or self.sync_new_var.get(),
             poll_interval=self.poll_interval_var.get(),
+            sync_new=self.sync_new_var.get(),
+            index_interval=self.index_interval_var.get(),
         )
 
     def _run_logged(
@@ -753,6 +777,9 @@ class TelegramArchiveApp(tk.Tk):
         workers: str = "",
         watch: bool = False,
         poll_interval: str = "",
+        sync_new: bool = False,
+        index_interval: str = "",
+        new_only: bool = False,
     ) -> None:
         try:
             command = build_command(
@@ -765,6 +792,9 @@ class TelegramArchiveApp(tk.Tk):
                 workers=workers,
                 watch=watch,
                 poll_interval=poll_interval,
+                sync_new=sync_new,
+                index_interval=index_interval,
+                new_only=new_only,
             )
         except ValueError as exc:
             messagebox.showerror(self._t("invalid_options"), str(exc))
@@ -795,10 +825,16 @@ class TelegramArchiveApp(tk.Tk):
             return
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        if label in {"download", "resume"}:
+            try:
+                archive_paths(self._root_path()).sync_stop_path.unlink()
+            except FileNotFoundError:
+                pass
         self.last_command = command
         self._append_log(f"\n$ {' '.join(command)}\n")
         self.status_var.set(f"{self._t('running')}: {label}")
         self._stop_requested = False
+        self._running_label = label
         self.process = subprocess.Popen(
             command,
             cwd=self._command_cwd(),
@@ -809,6 +845,7 @@ class TelegramArchiveApp(tk.Tk):
             encoding="utf-8",
             errors="replace",
             env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         restart_on_failure = label in {"download", "resume"} and self.watchdog_var.get()
         thread = threading.Thread(target=self._reader_thread, args=(self.process, label, restart_on_failure), daemon=True)
@@ -819,6 +856,8 @@ class TelegramArchiveApp(tk.Tk):
         for line in process.stdout:
             self.output_queue.put(("log", line))
         code = process.wait()
+        if self.process is process:
+            self._running_label = None
         self.output_queue.put(("log", f"[{label}] exited with code {code}\n"))
         state = self._t("finished") if code == 0 else self._t("failed")
         self.output_queue.put(("status", f"{state}: {label} (exit {code})"))
@@ -845,8 +884,22 @@ class TelegramArchiveApp(tk.Tk):
             self.status_var.set(self._t("nothing_to_stop"))
             return
         self._stop_requested = True
-        self.process.terminate()
+        process = self.process
+        if self._running_label in {"download", "resume"}:
+            stop_file = archive_paths(self._root_path()).sync_stop_path
+            stop_file.parent.mkdir(parents=True, exist_ok=True)
+            stop_file.write_text("Safe stop requested by Telegram Media Archive GUI.\n", encoding="utf-8")
+            self._append_log(f"[stop] {self._t('stopping_safely')}: {stop_file}\n")
+            self.status_var.set(self._t("stopping_safely"))
+            self.after(30_000, lambda: self._force_stop_after_timeout(process))
+            return
+        process.terminate()
         self.status_var.set(self._t("stopped"))
+
+    def _force_stop_after_timeout(self, process: subprocess.Popen[str]) -> None:
+        if self.process is process and process.poll() is None:
+            self._append_log(f"[stop] {self._t('stop_timeout')}\n")
+            process.terminate()
 
     def _setup_tray_if_available(self) -> None:
         try:
@@ -890,6 +943,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--auto-resume", action="store_true")
+    parser.add_argument("--auto-sync", action="store_true")
     return parser.parse_known_args(argv)[0]
 
 
@@ -899,6 +953,8 @@ def main(argv: list[str] | None = None) -> None:
     app = TelegramArchiveApp(initial_root=args.root)
     if args.auto_resume:
         app.after(1000, app._resume_pending)
+    elif args.auto_sync:
+        app.after(1000, app._start_auto_sync)
     app.mainloop()
 
 

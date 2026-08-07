@@ -60,7 +60,8 @@ The app enables Windows high-DPI awareness. It should look sharper on 4K display
 - `Restart failed downloads automatically`: applies to download commands launched from the GUI. If the download subprocess exits with an error, the app waits 10 seconds and restarts the last download command. Manual `Stop Running Command` does not trigger a restart.
 - `Keep polling indexed pending items`: keeps the download command alive after a pass and rechecks the local SQLite pending list at the configured interval.
 - `Poll interval (seconds)`: wait time between polling passes. Minimum 10 seconds; default 300 seconds.
-- Polling only rechecks media already indexed into the local database. It does not automatically add newly posted Telegram group media. Run `Index Media` when you want to add new posts to the local queue.
+- `Keep polling indexed pending items` rechecks local work. `Automatically index newly posted group media` independently checks the selected group after the highest locally indexed message ID. Both operations share one Telegram client and session.
+- `New-media check interval` defaults to 300 seconds and has a minimum of 10 seconds. Enabling new-media indexing also keeps the downloader in watch mode.
 - `Archive root`: lives on `Dashboard` and stores login state, the SQLite database, media files, `.part` files, and logs.
 - `Create one consistent SQLite snapshot per running day`: while the app is open, it checks every five minutes and uses SQLite's backup API without stopping downloads.
 - `Optional snapshot mirror directory`: stores a verified second copy on another disk. Leave it empty to keep only `state\snapshots`.
@@ -106,6 +107,12 @@ The GUI window and the download subprocess are separate. In old builds the windo
 
 - Do not share `state`, `.session`, `archive.sqlite3`, downloaded media, API hashes, verification codes, or phone numbers.
 - Do not delete `.part` files unless you intentionally want to restart those files.
-- If a GUI-launched download is active, use `Stop Running Command` before closing the app. You can resume later.
+- If a GUI-launched download is active, use `Stop Running Command` before closing the app. Download/resume commands receive a safe-stop sentinel, flush each `.part` at a network chunk boundary, and remain resumable. A 30-second timeout is only a fallback.
+
+## One-click encrypted cloud archive
+
+On a machine with the OpenList sidecar deployed, run `D:\Cloud Storage\Openlist\launchers\启动连续归档.cmd`. It starts OpenList, the encrypted uploader, and the Telegram app in that order. Completed local files are encrypted with their names, uploaded, verified, and only then removed locally. Partial `.part` files are never uploaded.
+
+Use `停止连续归档.cmd` before shutdown or a planned pause. These launchers do not create a startup entry, scheduled task, or Windows service.
 - If downloads are slow, the bottleneck is often Telegram or the network path. Lower `Workers` if other business traffic is affected.
 - Make sure the target disk has enough space for the indexed total size plus safety margin.
