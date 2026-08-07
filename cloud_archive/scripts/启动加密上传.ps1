@@ -1,7 +1,7 @@
 param(
     [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
     [string]$ArchiveRoot = "E:\电报视频导出_断点续传",
-    [string]$BandwidthLimit = "2M",
+    [string]$BandwidthLimit = "off",
     [int]$PollInterval = 300
 )
 

@@ -181,6 +181,11 @@ class CloudUploaderTests(unittest.TestCase):
         self.assertIn("--local-encoding", command)
         self.assertEqual(command[command.index("--local-encoding") + 1], "None")
 
+    def test_upload_bandwidth_is_unlimited_by_default(self):
+        args = cloud_uploader.build_parser().parse_args(["run"])
+
+        self.assertEqual(args.bwlimit, "off")
+
 
 if __name__ == "__main__":
     unittest.main()

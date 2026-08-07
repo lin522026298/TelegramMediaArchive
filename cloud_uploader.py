@@ -1077,7 +1077,11 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="Run the persistent upload queue")
     run.add_argument("--once", action="store_true")
     run.add_argument("--delete-local", action="store_true")
-    run.add_argument("--bwlimit", default="2M")
+    run.add_argument(
+        "--bwlimit",
+        default="off",
+        help="rclone bandwidth limit; 'off' disables the local bandwidth cap",
+    )
     run.add_argument("--poll-interval", type=int, default=300)
 
     subparsers.add_parser("status", help="Show queue and heartbeat status")
