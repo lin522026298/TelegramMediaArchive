@@ -95,6 +95,11 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertTrue(app.has_enough_space(free_bytes=1000, required_bytes=400, min_free_bytes=500))
         self.assertFalse(app.has_enough_space(free_bytes=1000, required_bytes=600, min_free_bytes=500))
 
+    def test_default_disk_reserve_is_20_gib(self):
+        app = load_module()
+
+        self.assertEqual(app.DEFAULT_MIN_FREE_GB, 20)
+
     def test_batch_records_preserves_order_and_respects_worker_count(self):
         app = load_module()
         records = [

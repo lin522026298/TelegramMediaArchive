@@ -59,6 +59,7 @@ if ($RunningApp.Count -eq 0) {
             "--root", "`"$ArchiveRoot`"",
             "resume",
             "--workers", "3",
+            "--min-free-gb", "20",
             "--watch",
             "--poll-interval", "300",
             "--sync-new",

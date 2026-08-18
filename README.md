@@ -157,6 +157,9 @@ python tg_media_archive.py resume --workers 3 --watch --poll-interval 300 --sync
 
 并发下载按数据库里的消息时间和消息 ID 分批调度，例如 `--workers 4` 会同时处理当前顺序里的 4 个文件，等这一批结束后再进入下一批。每个文件写入独立的 `.part` 文件，完成后再原子重命名为正式文件；断点续传按磁盘上实际 `.part` 大小恢复，不依赖日志里的进度数字。
 
+下载器与云归档反压均默认预留 20 GiB 空闲空间。领取下一批文件前会估算整批大小，
+云上传队列积压或剩余空间触及保护线时会等待，不会删除 `.part` 或重建下载状态。
+
 检查已下载文件是否缺失或大小不符：
 
 ```powershell
@@ -194,9 +197,9 @@ python -m venv .venv
 输出文件：
 
 ```text
-release\TelegramMediaArchive-0.1.4-source.zip
-release\TelegramMediaArchive-0.1.4-windows-x86_64.zip
-release\TelegramMediaArchive-0.1.4-windows-x86_64\
+release\TelegramMediaArchive-0.1.5-source.zip
+release\TelegramMediaArchive-0.1.5-windows-x86_64.zip
+release\TelegramMediaArchive-0.1.5-windows-x86_64\
 ```
 
 便携包里包含：

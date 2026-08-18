@@ -132,7 +132,9 @@ These invariants are important. Do not break them during refactors.
 4. Concurrent workers must never write the same file. Current implementation batches ordered records and runs one task per record.
 5. Completed files are skipped when their size matches the indexed size.
 6. `verify` checks only records marked `downloaded`; `verify --repair` can reset missing/mismatched completed records.
-7. Disk free-space protection must be checked before each batch.
+7. Disk free-space protection must be checked before each batch. The application,
+   CLI, and cloud backpressure reserve must agree on 20 GiB; after accounting for
+   the next ordered batch, `free - next_batch_size` must remain at least 20 GiB.
 8. Without `--watch`, `download` and `resume` intentionally run one selected pass and exit.
 9. With `--watch`, the downloader re-queries the local SQLite pending list after each pass and sleeps for `--poll-interval` seconds.
 10. Only `--sync-new` enables Telegram-side incremental indexing. It requires watch mode and uses `latest_message_id(chat_id)` as Telethon `min_id`; plain watch mode must remain local-only.
@@ -324,9 +326,9 @@ Build:
 Expected output:
 
 ```text
-release/TelegramMediaArchive-0.1.4-windows-x86_64/
-release/TelegramMediaArchive-0.1.4-windows-x86_64.zip
-release/TelegramMediaArchive-0.1.4-source.zip
+release/TelegramMediaArchive-0.1.5-windows-x86_64/
+release/TelegramMediaArchive-0.1.5-windows-x86_64.zip
+release/TelegramMediaArchive-0.1.5-source.zip
 ```
 
 The portable folder must include:
@@ -361,7 +363,7 @@ Then add hidden imports to `scripts/build_release.ps1`.
 
 ## Manual smoke test after packaging
 
-1. Open `release\TelegramMediaArchive-0.1.4-windows-x86_64\TelegramMediaArchive.exe`.
+1. Open `release\TelegramMediaArchive-0.1.5-windows-x86_64\TelegramMediaArchive.exe`.
 2. Switch language to English and back to Chinese.
 3. Toggle dark mode.
 4. Visit each left navigation page and check that the buttons match the page purpose.
@@ -375,7 +377,7 @@ Then add hidden imports to `scripts/build_release.ps1`.
 12. Run:
 
    ```powershell
-   .\release\TelegramMediaArchive-0.1.4-windows-x86_64\TelegramMediaArchiveCLI.exe --help
+   .\release\TelegramMediaArchive-0.1.5-windows-x86_64\TelegramMediaArchiveCLI.exe --help
    ```
 
 Do not run login against a maintainer's personal account during generic release verification.

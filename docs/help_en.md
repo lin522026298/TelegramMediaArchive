@@ -10,7 +10,7 @@ This app downloads photos and videos from a Telegram group or channel to local s
 - `logs` stores command logs.
 - Downloads use the Telegram API, so Telegram Desktop can be closed.
 - If the network, app, or computer stops, click `Resume Pending` later to continue from `.part` files.
-- The downloader keeps a minimum amount of disk space free and stops before filling the disk.
+- The downloader keeps at least 20 GiB of disk space free and waits before filling the disk.
 
 ## First run
 
@@ -115,4 +115,4 @@ On a machine with the OpenList sidecar deployed, run `D:\Cloud Storage\Openlist\
 
 Use `停止连续归档.cmd` before shutdown or a planned pause. These launchers do not create a startup entry, scheduled task, or Windows service.
 - If downloads are slow, the bottleneck is often Telegram or the network path. Lower `Workers` if other business traffic is affected.
-- Make sure the target disk has enough space for the indexed total size plus safety margin.
+- Make sure the target disk has enough space for the indexed total size plus the 20 GiB safety reserve.

@@ -8,10 +8,10 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 
-from tg_media_archive import DEFAULT_ROOT
+from tg_media_archive import DEFAULT_MIN_FREE_GB, DEFAULT_ROOT
 
 
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.1.5"
 VALID_KINDS = {"all", "photo", "video"}
 MAX_WORKERS = 8
 DEFAULT_WORKERS = "4"
@@ -542,7 +542,7 @@ def build_command(
             command.extend(["--from", start.strip()])
         if end.strip():
             command.extend(["--to", end.strip()])
-        command.extend(["--kind", kind])
+        command.extend(["--kind", kind, "--min-free-gb", str(DEFAULT_MIN_FREE_GB)])
         if limit.strip():
             command.extend(["--limit", limit.strip()])
         if workers.strip():
@@ -559,6 +559,7 @@ def build_command(
             if index_interval.strip():
                 command.extend(["--index-interval", index_interval.strip()])
     elif action == "resume":
+        command.extend(["--min-free-gb", str(DEFAULT_MIN_FREE_GB)])
         if limit.strip():
             validate_download_options("", "", "all", limit)
             command.extend(["--limit", limit.strip()])

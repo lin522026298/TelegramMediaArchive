@@ -12,6 +12,9 @@ import cloud_uploader
 
 
 class CloudUploaderTests(unittest.TestCase):
+    def test_cloud_backpressure_reserves_20_gib(self):
+        self.assertEqual(cloud_uploader.MIN_FREE_BYTES, 20 * 1024**3)
+
     def _fixture(self, root: Path):
         base = root / "sidecar"
         archive = root / "archive"

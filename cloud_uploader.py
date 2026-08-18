@@ -29,7 +29,7 @@ PILOT_GATE_NAME = "pilot-verification.json"
 BACKPRESSURE_FLAG_NAME = "cloud-backpressure.pause"
 HIGH_WATER_BYTES = 100 * 1024**3
 LOW_WATER_BYTES = 50 * 1024**3
-MIN_FREE_BYTES = 150 * 1024**3
+MIN_FREE_BYTES = 20 * 1024**3
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 SCHEMA_VERSION = 1
 
