@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
     [switch]$OpenBrowser
 )
@@ -27,6 +27,27 @@ if ($Existing) {
         throw "端口 5244 已被其他程序占用。"
     }
 } else {
+    $DaemonPidPath = Join-Path $BaseDir "daemon\pid"
+    if (Test-Path -LiteralPath $DaemonPidPath -PathType Leaf) {
+        $DaemonPidText = (Get-Content -LiteralPath $DaemonPidPath -Raw).Trim()
+        $DaemonOwner = $null
+        if ($DaemonPidText -match '^\d+$') {
+            $DaemonPid = 0
+            if ([int]::TryParse($DaemonPidText, [ref]$DaemonPid)) {
+                $DaemonOwner = Get-Process -Id $DaemonPid -ErrorAction SilentlyContinue
+            }
+        }
+        if ($DaemonOwner) {
+            if (-not $DaemonOwner.Path) {
+                throw "无法确认 OpenList PID 所属进程，保留标记并停止启动。"
+            }
+            if ([System.IO.Path]::GetFullPath($DaemonOwner.Path) -eq [System.IO.Path]::GetFullPath($Exe)) {
+                throw "OpenList 进程仍存在但未监听端口 5244；保留进程和 PID，请查看 data\log。"
+            }
+        }
+        Remove-Item -LiteralPath $DaemonPidPath -ErrorAction Stop
+        Write-Host "已清理失效的 OpenList PID 标记，没有结束任何进程。"
+    }
     $Start = Start-Process -FilePath $Exe -ArgumentList @("start", "--data", "data") -WorkingDirectory $BaseDir -WindowStyle Hidden -PassThru
 
     $Deadline = (Get-Date).AddSeconds(30)

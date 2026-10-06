@@ -1,16 +1,18 @@
-﻿# Telegram 群媒体可断点下载器
+# Telegram 群媒体可断点下载器
 
 这个仓库提供一个纯 Python 桌面 App 和 CLI，用 Telegram API 归档群组里的图片和视频。它支持断点续传、有序并发下载、本地任务轮询、同会话增量索引群组新媒体、下载异常守护、每日 SQLite 一致性快照、中英文界面、明/暗色主题、高 DPI 适配、帮助文档入口和 Windows x86_64 便携打包。
 
 仓库还包含可选的 `TelegramCloudUploader` 侧车。它不替换 Telegram 下载内核，而是把已经完成的正式文件按顺序交给 `rclone crypt -> chunker -> OpenList -> 百度网盘`，完成内容与名称加密、云端校验和可恢复的本地清理。部署、恢复和安全约束见 [cloud_archive/使用说明（中文）.md](cloud_archive/使用说明（中文）.md)。
 
-默认保存位置可在界面里修改。当前自用配置常用：
+新用户默认保存到自己的下载目录，空闲时可在首页更改；升级保持原有设置：
 
 ```text
-E:\电报视频导出_断点续传
+%USERPROFILE%\Downloads\TelegramMediaArchive
 ```
 
 该目录下的 `state` 会保存 `config.json`、Telegram `.session` 和 SQLite 状态库；`media` 保存实际下载文件；`logs` 保存日志。这些都是本地状态和敏感信息，不应提交到 git。
+
+0.1.7 已修复整体审查的 R1–R10：单目录单群绑定、会话互斥、安全退出、删除前云端复验、备份故障隔离、索引超时恢复、恢复结果校验与凭证隔离。详见 [修复验收说明](docs/reviews/0.1.7-修复验收.md)。云中转和下载解耦；不会默认添加开机项。
 
 ## 安装
 
@@ -160,6 +162,12 @@ python tg_media_archive.py resume --workers 3 --watch --poll-interval 300 --sync
 下载器与云归档反压均默认预留 20 GiB 空闲空间。领取下一批文件前会估算整批大小，
 云上传队列积压或剩余空间触及保护线时会等待，不会删除 `.part` 或重建下载状态。
 
+0.1.6 起，连续模式在磁盘空间恢复后自动继续。连接、消息读取或下载分块连续
+180 秒没有返回时会取消该轮网络任务，保留断点，等待 10 秒后重建连接；这是
+无进展超时，不是限制整个视频的下载时长。失败批次保留供下一轮重试，后续批次仍
+按原有消息顺序处理，避免失效文件堵住队列。APP 启动的命令会把输出和退出原因写入
+`logs\telegram-download.log`（每份 10 MiB，保留 3 份历史日志）。
+
 检查已下载文件是否缺失或大小不符：
 
 ```powershell
@@ -169,7 +177,7 @@ python tg_media_archive.py verify
 创建当天 SQLite 一致性快照并镜像到另一块磁盘：
 
 ```powershell
-python tg_media_archive.py --root "E:\电报视频导出_断点续传" snapshot --mirror "D:\Cloud Storage\Openlist\state-backups"
+python tg_media_archive.py --root "E:\TelegramArchive" snapshot --mirror "D:\Cloud Storage\Openlist\state-backups"
 ```
 
 应用运行时每 5 分钟检查一次日期；当天尚无快照时自动创建。应用没有运行的日期不会由计划任务补做。
@@ -197,9 +205,9 @@ python -m venv .venv
 输出文件：
 
 ```text
-release\TelegramMediaArchive-0.1.5-source.zip
-release\TelegramMediaArchive-0.1.5-windows-x86_64.zip
-release\TelegramMediaArchive-0.1.5-windows-x86_64\
+release\TelegramMediaArchive-0.1.7-source.zip
+release\TelegramMediaArchive-0.1.7-windows-x86_64.zip
+release\TelegramMediaArchive-0.1.7-windows-x86_64\
 ```
 
 便携包里包含：

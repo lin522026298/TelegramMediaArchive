@@ -19,10 +19,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
 
 from sqlite_snapshot import create_daily_snapshot
+from restore_verify import restore_plan, verify_restored
 
 
 DEFAULT_BASE_DIR = Path(r"D:\Cloud Storage\Openlist")
-DEFAULT_ARCHIVE_ROOT = Path(r"E:\电报视频导出_断点续传")
+DEFAULT_ARCHIVE_ROOT = Path(os.environ.get("TG_ARCHIVE_ROOT", str(Path.home() / "Downloads" / "TelegramMediaArchive")))
 REMOTE_NAME = "baidu_crypt:"
 STATE_FILE_NAME = "upload_state.sqlite3"
 PILOT_GATE_NAME = "pilot-verification.json"
@@ -506,11 +507,13 @@ class RcloneClient:
         logger: logging.Logger,
         heartbeat: Callable[[str, UploadItem | None, dict[str, Any] | None], None],
         bwlimit: str,
+        respect_stop: bool = True,
     ):
         self.paths = paths
         self.logger = logger
         self.heartbeat = heartbeat
         self.bwlimit = bwlimit
+        self.respect_stop = respect_stop
 
     def _base_command(self) -> list[str]:
         return [
@@ -531,28 +534,30 @@ class RcloneClient:
     ) -> str:
         self.paths.log_file.parent.mkdir(parents=True, exist_ok=True)
         command = self._base_command() + arguments
-        with tempfile.NamedTemporaryFile(
-            mode="w+b",
-            prefix="rclone-",
-            suffix=".log",
-            dir=self.paths.log_file.parent,
-            delete=False,
-        ) as output:
-            output_path = Path(output.name)
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            if input_text is not None and process.stdin is not None:
-                process.stdin.write(input_text.encode("utf-8"))
-                process.stdin.close()
-            try:
+        output_path = None
+        process = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w+b",
+                prefix="rclone-",
+                suffix=".log",
+                dir=self.paths.log_file.parent,
+                delete=False,
+            ) as output:
+                output_path = Path(output.name)
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                if input_text is not None and process.stdin is not None:
+                    process.stdin.write(input_text.encode("utf-8"))
+                    process.stdin.close()
                 while process.poll() is None:
                     self.heartbeat(phase, item, {"rclone_pid": process.pid})
-                    if self.paths.stop_file.exists():
+                    if self.respect_stop and self.paths.stop_file.exists():
                         process.terminate()
                         try:
                             process.wait(timeout=15)
@@ -560,21 +565,26 @@ class RcloneClient:
                             process.kill()
                         raise StopRequested("Stop requested while rclone was active")
                     time.sleep(5)
-            finally:
                 return_code = process.wait()
-
-        try:
-            raw = output_path.read_bytes()
+            with output_path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - 64 * 1024))
+                text = handle.read(64 * 1024).decode("utf-8", errors="replace")
+            if return_code != 0:
+                safe_tail = "\n".join(text.splitlines()[-20:])
+                raise UploadError(f"rclone exited with code {return_code} during {phase}: {safe_tail}")
+            return text
         finally:
-            with contextlib.suppress(OSError):
-                output_path.unlink()
-        text = raw[-64 * 1024 :].decode("utf-8", errors="replace")
-        if return_code != 0:
-            safe_tail = "\n".join(text.splitlines()[-20:])
-            raise UploadError(
-                f"rclone exited with code {return_code} during {phase}: {safe_tail}"
-            )
-        return text
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            if output_path is not None:
+                with contextlib.suppress(OSError):
+                    output_path.unlink()
 
     def copy_to(self, source: Path, remote_path: str, item: UploadItem) -> None:
         self.run(
@@ -624,6 +634,11 @@ class RcloneClient:
             input_text=remote_name + "\n",
         )
 
+    def verify_remote_object(self, item: UploadItem) -> None:
+        payload = json.loads(self.run(["lsjson", REMOTE_NAME + item.remote_path, "--stat"], item=item, phase="verifying"))
+        if payload.get("IsDir") or payload.get("Size") != item.observed_size:
+            raise UploadError("Remote object is missing or has an unexpected logical size")
+
 
 class CloudUploader:
     def __init__(
@@ -641,6 +656,7 @@ class CloudUploader:
         self.logger = logger
         self.rclone = RcloneClient(paths, logger, self.write_heartbeat, bwlimit)
         self._next_snapshot_check = 0.0
+        self.backup_status: dict[str, Any] = {"state": "pending"}
 
     def write_heartbeat(
         self,
@@ -656,6 +672,7 @@ class CloudUploader:
             "counts": self.state.counts(),
             "pending_bytes": self.state.pending_bytes(),
             "delete_local": self.delete_local,
+            "backup": self.backup_status,
         }
         if item is not None:
             payload["current"] = {
@@ -766,11 +783,17 @@ class CloudUploader:
         if not force_check and now < self._next_snapshot_check:
             return
         self._next_snapshot_check = now + 300
-        result = create_daily_snapshot(
-            self.paths.archive_db,
-            self.paths.archive_snapshots,
-            mirror_dir=self.paths.snapshot_mirror,
-        )
+        try:
+            result = create_daily_snapshot(
+                self.paths.archive_db,
+                self.paths.archive_snapshots,
+                mirror_dir=self.paths.snapshot_mirror,
+            )
+        except Exception as exc:
+            self.backup_status = {"state": "error", "checked_at": utc_text(), "error": f"{type(exc).__name__}: {exc}"[:1000]}
+            self.logger.exception("Daily backup failed; uploads continue, retry in 300 seconds")
+            return
+        self.backup_status = {"state": "ok", "checked_at": utc_text()}
         if result.primary_created or result.mirror_created:
             self.logger.info(
                 "Daily SQLite snapshot ready: %s mirror=%s",
@@ -840,6 +863,8 @@ class CloudUploader:
 
         def hash_progress(processed: int) -> None:
             nonlocal last_heartbeat
+            if self.paths.stop_file.exists():
+                raise StopRequested("Stop requested during hashing")
             now = time.monotonic()
             if now - last_heartbeat >= 5:
                 self.write_heartbeat(
@@ -922,10 +947,13 @@ class CloudUploader:
             stat = source.stat()
             if stat.st_size != item.observed_size:
                 raise UploadError("Source size changed before local purge")
+            self.rclone.cryptcheck(source, item.remote_path, item)
             last_heartbeat = 0.0
 
             def purge_hash_progress(processed: int) -> None:
                 nonlocal last_heartbeat
+                if self.paths.stop_file.exists():
+                    raise StopRequested("Stop requested before local deletion")
                 now = time.monotonic()
                 if now - last_heartbeat >= 5:
                     self.write_heartbeat(
@@ -941,9 +969,13 @@ class CloudUploader:
             )
             if digest != item.sha256:
                 raise UploadError("Source SHA-256 changed before local purge")
+            current = source.stat()
+            if (current.st_size, current.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
+                raise UploadError("Source changed during pre-purge verification")
             self.mark_archive_record_archived(item)
             source.unlink()
         else:
+            self.rclone.verify_remote_object(item)
             self.mark_archive_record_archived(item)
         self.state.update_status(item, "local_purged", sha256=item.sha256)
         self.append_manifest("local_purged", item, item.sha256)
@@ -1009,26 +1041,31 @@ def run_uploader(args: argparse.Namespace) -> int:
         uploader.verify_delete_gate()
         with SingleInstanceLock(paths.lock_file):
             paths.pid_file.write_text(str(os.getpid()) + "\n", encoding="ascii")
-            state.recover_inflight()
-            queued, skipped = uploader.enqueue_downloaded()
-            logger.info("Queue scan complete: eligible=%d skipped=%d", queued, skipped)
-            uploader.ensure_daily_snapshot(force_check=True)
             try:
+                state.recover_inflight()
+                uploader.ensure_daily_snapshot(force_check=True)
                 while True:
                     if paths.stop_file.exists():
                         raise StopRequested("Stop requested")
-                    uploader.ensure_daily_snapshot()
-                    if uploader.process_one():
-                        continue
-                    if args.once:
-                        break
-                    queued, skipped = uploader.enqueue_downloaded()
-                    logger.info(
-                        "Queue poll complete: eligible=%d skipped=%d",
-                        queued,
-                        skipped,
-                    )
-                    wait_with_heartbeat(uploader, args.poll_interval)
+                    try:
+                        uploader.ensure_daily_snapshot()
+                        queued, skipped = uploader.enqueue_downloaded()
+                        logger.info("Queue poll complete: eligible=%d skipped=%d", queued, skipped)
+                        if uploader.process_one():
+                            continue
+                        if args.once:
+                            break
+                        wait_with_heartbeat(uploader, args.poll_interval)
+                    except (OSError, sqlite3.Error) as exc:
+                        if args.once:
+                            raise
+                        logger.exception("Transient queue/heartbeat failure; retry in 30 seconds")
+                        with contextlib.suppress(OSError, sqlite3.Error):
+                            uploader.write_heartbeat("error", extra={"error": str(exc)[:1000]})
+                        for _ in range(30):
+                            if paths.stop_file.exists():
+                                raise StopRequested("Stop requested")
+                            time.sleep(1)
             except StopRequested as exc:
                 logger.info("%s", exc)
                 uploader.write_heartbeat("stopped", extra={"reason": str(exc)})
@@ -1085,6 +1122,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--poll-interval", type=int, default=300)
 
     subparsers.add_parser("status", help="Show queue and heartbeat status")
+    restore = subparsers.add_parser("restore", help="Restore to an empty directory with manifest and cloud verification")
+    restore.add_argument("--remote-path", required=True)
+    restore.add_argument("--destination", type=Path, required=True)
     return parser
 
 
@@ -1097,6 +1137,20 @@ def main(argv: list[str] | None = None) -> int:
         return run_uploader(args)
     if args.command == "status":
         return print_status(args)
+    if args.command == "restore":
+        paths = RuntimePaths(Path(args.base_dir), Path(args.archive_root))
+        try:
+            plan = restore_plan(paths.manifest, args.remote_path, args.destination)
+            args.destination.mkdir(parents=True, exist_ok=True)
+            client = RcloneClient(paths, logging.getLogger("restore"), lambda *args: None, "off", respect_stop=False)
+            client.run(["copy", REMOTE_NAME + args.remote_path, str(args.destination), "--immutable", "--transfers", "1", "--checkers", "2"], item=None, phase="restoring")
+            verified = verify_restored(plan, args.destination)
+            remote = args.remote_path if len(plan) != 1 or next(iter(plan.values()))["remote_path"] != args.remote_path else split_remote_path(args.remote_path)[0]
+            client.run(["cryptcheck", str(args.destination), REMOTE_NAME + remote, "--one-way", "--checkers", "2"], item=None, phase="restore_verifying")
+            print(f"Restore verified: {verified} files (SHA-256 and cryptcheck)")
+            return 0
+        except (ValueError, OSError) as exc:
+            raise UploadError(str(exc)) from exc
     parser.error(f"Unknown command: {args.command}")
     return 2
 

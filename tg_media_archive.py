@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -25,15 +26,18 @@ from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 from sqlite_snapshot import create_daily_snapshot
+from process_lock import AlreadyRunningError, ProcessLock
 
 
-DEFAULT_ROOT = Path(os.environ.get("TG_ARCHIVE_ROOT", r"E:\电报视频导出_断点续传"))
+DEFAULT_ROOT = Path(os.environ.get("TG_ARCHIVE_ROOT", str(Path.home() / "Downloads" / "TelegramMediaArchive")))
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_CHUNK_SIZE = 512 * 1024
 DEFAULT_LIMIT = None
 DEFAULT_MIN_FREE_GB = 20
 DEFAULT_POLL_INTERVAL_SECONDS = 300
 DEFAULT_INDEX_INTERVAL_SECONDS = 300
+NETWORK_PROGRESS_TIMEOUT_SECONDS = 180
+STALL_RETRY_SECONDS = 10
 BACKPRESSURE_FLAG_NAME = "cloud-backpressure.pause"
 SYNC_STOP_FILE_NAME = "STOP_TELEGRAM_SYNC"
 CONFIG_NAME = "config.json"
@@ -50,6 +54,18 @@ RESERVED_WINDOWS_NAMES = {
 }
 FORBIDDEN_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 UNDERSCORE_RE = re.compile(r"_+")
+
+
+class DownloadStalledError(TimeoutError):
+    pass
+
+
+class ArchiveBindingError(ValueError):
+    pass
+
+
+class SyncStopRequested(Exception):
+    pass
 
 
 @dataclass(frozen=True)
@@ -183,6 +199,7 @@ class ArchiveDB:
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        self._bound_chat_id: int | None = None
         self.conn.execute("pragma journal_mode = wal")
         self.conn.execute("pragma foreign_keys = on")
         self._init_schema()
@@ -220,7 +237,27 @@ class ArchiveDB:
     def close(self) -> None:
         self.conn.close()
 
+    def bind_chat(self, chat_id: int) -> None:
+        with self._lock:
+            if self._bound_chat_id is not None:
+                if self._bound_chat_id != chat_id:
+                    raise ArchiveBindingError("Use another directory for a different group")
+                return
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+                bound = self.conn.execute("select value from settings where key='bound_chat_id'").fetchone()
+                existing = {int(row[0]) for row in self.conn.execute("select distinct chat_id from media")}
+                if existing - {chat_id} or (bound is not None and int(bound[0]) != chat_id):
+                    raise ArchiveBindingError("One archive directory supports one group only. Select a new directory for another group.")
+                self.conn.execute("insert or ignore into settings values ('bound_chat_id', ?)", (str(chat_id),))
+                self.conn.commit()
+                self._bound_chat_id = chat_id
+            except BaseException:
+                self.conn.rollback()
+                raise
+
     def upsert_media(self, record: MediaRecord) -> None:
+        self.bind_chat(record.chat_id)
         with self._lock:
             self.conn.execute(
                 """
@@ -317,9 +354,13 @@ class ArchiveDB:
         kind: str = "all",
         include_errors: bool = True,
         limit: int | None = None,
+        chat_id: int | None = None,
     ) -> list[MediaRecord]:
         filters = ["status NOT IN ('downloaded', 'archived')"]
         params: list[Any] = []
+        if chat_id is not None:
+            filters.append("chat_id = ?")
+            params.append(chat_id)
         if not include_errors:
             filters.append("status != 'error'")
         if start_utc is not None:
@@ -486,14 +527,18 @@ async def create_client(root: Path):
             save_config(root, config)
         api = API.TelegramDesktop.Generate(unique_id=str(session_path(root)))
         client = TelegramClient(str(session_path(root)), api=api)
-        await client.start(phone=str(config["phone"]))
     else:
         require_telethon()
         from telethon import TelegramClient
 
         config = prompt_missing_config(root, config)
         client = TelegramClient(str(session_path(root)), int(config["api_id"]), str(config["api_hash"]))
+    try:
         await client.start(phone=str(config["phone"]))
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(client.disconnect(), timeout=30)
+        raise
     return client, config
 
 
@@ -571,6 +616,11 @@ async def choose_chat(client: Any, root: Path, config: dict[str, Any]) -> dict[s
             break
         except (ValueError, IndexError):
             print("Enter a valid number from the list.")
+    db = ArchiveDB(db_path(root))
+    try:
+        db.bind_chat(int(selected.id))
+    finally:
+        db.close()
     config["chat_id"] = int(selected.id)
     config["chat_title"] = selected.name
     save_config(root, config)
@@ -595,6 +645,7 @@ async def index_media_messages(
     limit: int | None = DEFAULT_LIMIT,
     min_id: int = 0,
 ) -> int:
+    db.bind_chat(chat_id)
     count = 0
     arguments: dict[str, Any] = {
         "limit": limit,
@@ -603,14 +654,15 @@ async def index_media_messages(
     }
     if min_id > 0:
         arguments["min_id"] = min_id
-    async for message in client.iter_messages(entity, **arguments):
-        record = message_media_record(chat_id, message)
-        if record is None:
-            continue
-        db.upsert_media(record)
-        count += 1
-        if count % 100 == 0:
-            print(f"Indexed {count} media messages...")
+    async with contextlib.aclosing(guarded_download_chunks(client.iter_messages(entity, **arguments), db.path.parent.parent)) as messages:
+        async for message in messages:
+            record = message_media_record(chat_id, message)
+            if record is None:
+                continue
+            db.upsert_media(record)
+            count += 1
+            if count % 100 == 0:
+                print(f"Indexed {count} media messages...")
     return count
 
 
@@ -651,13 +703,77 @@ async def index_media(
         await client.disconnect()
 
 
-async def wait_with_stop_check(root: Path, seconds: int) -> bool:
+def check_index_task(index_task: asyncio.Task | None) -> None:
+    if index_task is not None and index_task.done() and not index_task.cancelled():
+        error = index_task.exception()
+        if error is not None:
+            raise error
+
+
+async def wait_with_stop_check(root: Path, seconds: int, index_task: asyncio.Task | None = None) -> bool:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
+        check_index_task(index_task)
         if sync_stop_path(root).exists():
             return True
         await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
     return sync_stop_path(root).exists()
+
+
+async def await_network_progress(awaitable: Any, root: Path) -> Any:
+    task = asyncio.ensure_future(awaitable)
+    deadline = time.monotonic() + NETWORK_PROGRESS_TIMEOUT_SECONDS
+    try:
+        while True:
+            if sync_stop_path(root).exists():
+                raise SyncStopRequested()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DownloadStalledError(
+                    f"No network progress for {NETWORK_PROGRESS_TIMEOUT_SECONDS} seconds"
+                )
+            done, _ = await asyncio.wait({task}, timeout=min(1.0, remaining))
+            if done:
+                return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+
+async def guarded_download_chunks(iterator: Any, root: Path):
+    iterator = iterator.__aiter__()
+    try:
+        while True:
+            try:
+                yield await await_network_progress(iterator.__anext__(), root)
+            except StopAsyncIteration:
+                return
+    finally:
+        close = getattr(iterator, "close", None) or getattr(iterator, "aclose", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(close(), timeout=30)
+
+
+async def run_download_batch(awaitables: Iterable[Any], index_task: asyncio.Task | None = None) -> list[Any]:
+    tasks = [asyncio.create_task(item) for item in awaitables]
+    try:
+        # A stalled worker must not leave the other workers holding the batch open.
+        pending = set(tasks)
+        while pending:
+            check_index_task(index_task)
+            done, pending = await asyncio.wait(pending, timeout=1, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                if not task.cancelled() and isinstance(task.exception(), DownloadStalledError):
+                    raise task.exception()
+        return [task.exception() if task.exception() is not None else task.result() for task in tasks]
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def incremental_index_loop(
@@ -681,6 +797,8 @@ async def incremental_index_loop(
             )
             print(f"Incremental index added {indexed} media messages.")
         except asyncio.CancelledError:
+            raise
+        except (DownloadStalledError, SyncStopRequested, ArchiveBindingError):
             raise
         except Exception as exc:
             print(f"Incremental index failed; retrying later: {type(exc).__name__}: {exc}")
@@ -733,7 +851,15 @@ async def download_one(
         print(f"skip existing {rel_path}")
         return True
 
-    message = await client.get_messages(entity, ids=record.message_id)
+    try:
+        message = await await_network_progress(
+            client.get_messages(entity, ids=record.message_id), root
+        )
+    except SyncStopRequested:
+        return False
+    except DownloadStalledError as exc:
+        db.mark_error(record.key, str(exc))
+        raise
     if not message or not getattr(message, "media", None):
         db.mark_error(record.key, "message or media no longer available")
         print(f"missing media msg={record.message_id}")
@@ -752,44 +878,57 @@ async def download_one(
 
     try:
         with part_path.open(mode) as handle:
-            async for chunk in client.iter_download(
+            iterator = client.iter_download(
                 message.media,
                 offset=offset,
                 chunk_size=chunk_size,
                 request_size=chunk_size,
                 file_size=record.size,
-            ):
-                if not chunk:
-                    continue
-                handle.write(chunk)
-                downloaded += len(chunk)
-                if sync_stop_path(root).exists():
-                    handle.flush()
-                    downloaded_on_disk = part_path.stat().st_size
-                    db.mark_downloading(record.key, rel_path.as_posix(), downloaded_on_disk)
-                    print(f"stop requested; kept resumable part {rel_path}")
-                    return False
-                now = time.monotonic()
-                if now - last_print >= 5:
-                    handle.flush()
-                    downloaded_on_disk = part_path.stat().st_size
-                    db.mark_downloading(record.key, rel_path.as_posix(), downloaded_on_disk)
-                    elapsed = max(now - start_time, 0.001)
-                    speed = downloaded - offset
-                    print(
-                        f"  {format_bytes(downloaded_on_disk)} / {format_bytes(record.size)} "
-                        f"({format_bytes(int(speed / elapsed))}/s)"
-                    )
-                    last_print = now
-        if final_path.exists():
-            final_path.unlink()
+            )
+            async with contextlib.aclosing(guarded_download_chunks(iterator, root)) as chunks:
+                async for chunk in chunks:
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                    downloaded += len(chunk)
+                    if sync_stop_path(root).exists():
+                        handle.flush()
+                        downloaded_on_disk = part_path.stat().st_size
+                        db.mark_downloading(record.key, rel_path.as_posix(), downloaded_on_disk)
+                        print(f"stop requested; kept resumable part {rel_path}")
+                        return False
+                    now = time.monotonic()
+                    if now - last_print >= 5:
+                        handle.flush()
+                        downloaded_on_disk = part_path.stat().st_size
+                        db.mark_downloading(record.key, rel_path.as_posix(), downloaded_on_disk)
+                        elapsed = max(now - start_time, 0.001)
+                        speed = downloaded - offset
+                        print(
+                            f"  {format_bytes(downloaded_on_disk)} / {format_bytes(record.size)} "
+                            f"({format_bytes(int(speed / elapsed))}/s)"
+                        )
+                        last_print = now
+        if record.size is not None and part_path.stat().st_size != record.size:
+            raise ValueError(
+                f"Incomplete download: expected {record.size} bytes, got {part_path.stat().st_size}"
+            )
         part_path.replace(final_path)
         db.mark_downloaded(record.key, rel_path.as_posix(), final_path.stat().st_size)
         print(f"saved {rel_path}")
         return True
+    except (SyncStopRequested, asyncio.CancelledError):
+        actual_size = part_path.stat().st_size if part_path.exists() else 0
+        db.mark_downloading(record.key, rel_path.as_posix(), actual_size)
+        if sync_stop_path(root).exists():
+            print(f"stop requested; kept resumable part {rel_path}")
+            return False
+        raise
     except Exception as exc:
         db.mark_error(record.key, f"{type(exc).__name__}: {exc}")
         print(f"error msg={record.message_id}: {type(exc).__name__}: {exc}")
+        if isinstance(exc, DownloadStalledError):
+            raise
         return False
 
 
@@ -815,13 +954,14 @@ async def download_media(
         raise SystemExit("--index-interval must be at least 10 seconds")
     if sync_new and not watch:
         raise SystemExit("--sync-new requires --watch")
-    client, config = await create_client(root)
+    client, config = await await_network_progress(create_client(root), root)
     db = ArchiveDB(db_path(root))
-    tz = ZoneInfo(str(config.get("timezone", DEFAULT_TIMEZONE)))
-    start_utc, end_utc = parse_date_bounds(start, end, tz)
     try:
-        entity = await get_configured_entity(client, root, config)
+        tz = ZoneInfo(str(config.get("timezone", DEFAULT_TIMEZONE)))
+        start_utc, end_utc = parse_date_bounds(start, end, tz)
+        entity = await await_network_progress(get_configured_entity(client, root, config), root)
         chat_id = int(config["chat_id"])
+        db.bind_chat(chat_id)
         refresh_chat_metadata(root, config, entity)
         min_free_bytes = int(min_free_gb * 1024**3)
         index_task = (
@@ -843,17 +983,18 @@ async def download_media(
                 )
                 if not watch:
                     break
-                if await wait_with_stop_check(root, poll_interval):
+                if await wait_with_stop_check(root, poll_interval, index_task):
                     break
                 continue
 
-            records = db.list_pending(start_utc=start_utc, end_utc=end_utc, kind=kind, include_errors=True, limit=limit)
+            check_index_task(index_task)
+            records = db.list_pending(start_utc=start_utc, end_utc=end_utc, kind=kind, include_errors=True, limit=limit, chat_id=chat_id)
             print(f"Pending records selected: {len(records)}")
             if not records:
                 if not watch:
                     break
                 print(f"No pending records. Waiting {poll_interval} seconds before polling again.")
-                if await wait_with_stop_check(root, poll_interval):
+                if await wait_with_stop_check(root, poll_interval, index_task):
                     break
                 continue
 
@@ -880,38 +1021,61 @@ async def download_media(
                     )
                     stopped_for_space = True
                     break
-                results = await asyncio.gather(
-                    *(download_one(client, entity, root, tz, db, record, chunk_size) for record in batch),
-                    return_exceptions=True,
-                )
+                try:
+                    results = await run_download_batch(
+                        (download_one(client, entity, root, tz, db, record, chunk_size) for record in batch), index_task
+                    )
+                except DownloadStalledError as exc:
+                    print(f"Stalled batch kept for a later pass: {exc}", file=sys.stderr)
+                    if index_task is not None:
+                        index_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, DownloadStalledError, SyncStopRequested):
+                            await index_task
+                        index_task = None
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(client.disconnect(), timeout=30)
+                    if await wait_with_stop_check(root, STALL_RETRY_SECONDS):
+                        return
+                    client, config = await await_network_progress(create_client(root), root)
+                    entity = await await_network_progress(get_configured_entity(client, root, config), root)
+                    db.bind_chat(int(config["chat_id"]))
+                    if sync_new:
+                        index_task = asyncio.create_task(
+                            incremental_index_loop(client, entity, db, root, chat_id, index_interval)
+                        )
+                    # Keep the pass cursor: one persistently bad file must not starve later batches.
+                    continue
                 if stop_file.exists():
                     print("Continuous sync stopped; .part files remain resumable.")
                     return
                 if any(result is not True for result in results):
                     await asyncio.sleep(2)
 
-            if stopped_for_space or not watch:
+            if not watch:
                 break
-            if stopped_for_backpressure:
+            if stopped_for_space or stopped_for_backpressure:
                 print(
-                    f"Encrypted upload is draining the local queue. "
-                    f"Waiting {poll_interval} seconds before checking again."
+                    f"Waiting {poll_interval} seconds for disk space or encrypted upload; "
+                    "continuous mode will resume automatically."
                 )
-                if await wait_with_stop_check(root, poll_interval):
+                if await wait_with_stop_check(root, poll_interval, index_task):
                     break
                 continue
             print(f"Download pass complete. Waiting {poll_interval} seconds before polling again.")
-            if await wait_with_stop_check(root, poll_interval):
+            if await wait_with_stop_check(root, poll_interval, index_task):
                 break
     finally:
         if "index_task" in locals() and index_task is not None:
             index_task.cancel()
             try:
                 await index_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, DownloadStalledError, SyncStopRequested):
                 pass
         db.close()
-        await client.disconnect()
+        try:
+            await asyncio.wait_for(client.disconnect(), timeout=30)
+        except TimeoutError:
+            print("Telegram disconnect timed out; closing this download loop.", file=sys.stderr)
 
 
 def run_download_command(
@@ -949,14 +1113,17 @@ def run_download_command(
             return 0
         except KeyboardInterrupt:
             raise
+        except ArchiveBindingError:
+            raise
         except Exception as exc:
             if not watch:
                 raise
             if sync_stop_path(root).exists():
                 print("Continuous sync stop requested after a download-loop error.")
                 return 0
-            print(f"Download loop failed and will restart in {poll_interval} seconds: {type(exc).__name__}: {exc}", file=sys.stderr)
-            retry_at = time.monotonic() + poll_interval
+            retry_seconds = STALL_RETRY_SECONDS if isinstance(exc, DownloadStalledError) else poll_interval
+            print(f"Download loop failed and will restart in {retry_seconds} seconds: {type(exc).__name__}: {exc}", file=sys.stderr)
+            retry_at = time.monotonic() + retry_seconds
             while time.monotonic() < retry_at:
                 if sync_stop_path(root).exists():
                     print("Continuous sync stop requested during the retry wait.")
@@ -1171,7 +1338,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     root = args.root
@@ -1230,6 +1397,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         parser.error(f"Unknown command: {command}")
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    command = args.command or "menu"
+    if command in {"setup", "summary", "snapshot"} or (command == "verify" and not args.repair):
+        return _main(argv)
+    try:
+        with ProcessLock(args.root.resolve() / "state" / "telegram-session.lock"):
+            return _main(argv)
+    except (AlreadyRunningError, ArchiveBindingError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

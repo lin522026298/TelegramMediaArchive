@@ -1,9 +1,10 @@
-param(
+﻿param(
     [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
-    [string]$ArchiveRoot = "E:\电报视频导出_断点续传"
+    [string]$ArchiveRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $ArchiveRoot) { . (Join-Path $PSScriptRoot "读取运行路径.ps1") -BaseDir $BaseDir }
 $Uploader = Join-Path $BaseDir "TelegramCloudUploader.exe"
 if (-not (Test-Path -LiteralPath $Uploader -PathType Leaf)) {
     throw "找不到加密上传器：$Uploader"

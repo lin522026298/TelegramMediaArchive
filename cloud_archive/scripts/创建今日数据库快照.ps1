@@ -1,11 +1,14 @@
-param(
-    [string]$ArchiveRoot = "E:\电报视频导出_断点续传",
-    [string]$AppDir = "D:\Tools\TelegramMediaArchive",
-    [string]$MirrorDir = "D:\Cloud Storage\Openlist\state-backups",
+﻿param(
+    [string]$ArchiveRoot = "",
+    [string]$AppDir = "",
+    [string]$MirrorDir = "",
+    [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
     [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $ArchiveRoot -or -not $AppDir) { . (Join-Path $PSScriptRoot "读取运行路径.ps1") -BaseDir $BaseDir }
+if (-not $MirrorDir) { $MirrorDir = Join-Path $BaseDir "state-backups" }
 $Cli = Join-Path $AppDir "TelegramMediaArchiveCLI.exe"
 if (-not (Test-Path -LiteralPath $Cli)) {
     throw "找不到下载器 CLI：$Cli"

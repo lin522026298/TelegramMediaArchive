@@ -1,12 +1,14 @@
-param(
+﻿param(
     [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
-    [string]$AppDir = "D:\Tools\TelegramMediaArchive",
-    [string]$ArchiveRoot = "E:\电报视频导出_断点续传",
+    [string]$AppDir = "",
+    [string]$ArchiveRoot = "",
     [string]$BandwidthLimit = "off",
-    [int]$UploadPollInterval = 60
+    [int]$UploadPollInterval = 60,
+    [switch]$Background
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $ArchiveRoot -or -not $AppDir) { . (Join-Path $PSScriptRoot "读取运行路径.ps1") -BaseDir $BaseDir }
 $AppExe = Join-Path $AppDir "TelegramMediaArchive.exe"
 $CliExe = Join-Path $AppDir "TelegramMediaArchiveCLI.exe"
 $StartUploader = Join-Path $PSScriptRoot "启动加密上传.ps1"
@@ -44,10 +46,13 @@ $RunningApp = @(Get-CimInstance Win32_Process -Filter "Name='TelegramMediaArchiv
 })
 
 if ($RunningApp.Count -eq 0) {
+    $GuiArguments = @("--root", "`"$ArchiveRoot`"", "--auto-sync")
+    if ($Background) { $GuiArguments += "--background" }
     Start-Process `
         -FilePath $AppExe `
-        -ArgumentList @("--root", "`"$ArchiveRoot`"", "--auto-sync") `
-        -WorkingDirectory $AppDir | Out-Null
+        -ArgumentList $GuiArguments `
+        -WorkingDirectory $AppDir `
+        -WindowStyle Hidden | Out-Null
     Write-Host "已打开 Telegram 归档 APP，并请求自动开始连续归档。"
 } else {
     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null

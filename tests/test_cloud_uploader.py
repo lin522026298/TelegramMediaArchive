@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cloud_uploader
 
@@ -88,6 +88,7 @@ class CloudUploaderTests(unittest.TestCase):
             delete_local=True,
             logger=logger,
         )
+        uploader.rclone = Mock()
         return paths, state, uploader, verified, source
 
     def test_resolve_media_path_rejects_escape_and_part_files(self):

@@ -1,11 +1,12 @@
-param(
+﻿param(
     [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
-    [string]$ArchiveRoot = "E:\电报视频导出_断点续传",
+    [string]$ArchiveRoot = "",
     [string]$BandwidthLimit = "off",
     [int]$PollInterval = 300
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $ArchiveRoot) { . (Join-Path $PSScriptRoot "读取运行路径.ps1") -BaseDir $BaseDir }
 $Uploader = Join-Path $BaseDir "TelegramCloudUploader.exe"
 $StartOpenList = Join-Path $PSScriptRoot "启动OpenList.ps1"
 $StopFile = Join-Path $BaseDir "manifests\STOP_CLOUD_UPLOADER"

@@ -1,6 +1,28 @@
-﻿# Technical Reproduction Guide for AI and Developers
+# Technical Reproduction Guide for AI and Developers
 
 This document is written for future agents and maintainers. It explains how to reproduce the project, avoid known traps, and produce release artifacts.
+
+## 0.1.7 Implementation Contract
+
+Release baseline: CPython 3.11.9 Windows x86_64, dependencies in `requirements-lock-windows.txt`, external binary hashes in `cloud_archive/第三方版本锁定.json`. Install the lock with pip, run unittest discovery, commit sanitized sources, then run `scripts/build_release.ps1`. The source ZIP is `git archive HEAD`, not a filesystem copy. An uncommitted tree is rejected to avoid source/EXE mismatches. Do not stage runtime data; run `scripts/privacy_audit.py` with optional local archive/cloud paths before publishing. Private scan values are never printed.
+
+R1: `ArchiveDB.bind_chat` checks persisted settings and distinct legacy chat IDs in an IMMEDIATE transaction, then caches the validated binding for that connection. `upsert_media`, selection and download/reconnection enforce binding; pending selection also filters chat_id. Mixed legacy databases must fail closed, not silently migrate. Keep all existing path names to preserve `.part` and cloud keys.
+
+R2: `process_lock.ProcessLock` uses a one-byte nonblocking msvcrt lock on Windows or flock elsewhere. `main` holds `state/telegram-session.lock` across the entire command including watch retry. Read-only summary/verification and SQLite snapshots are exempt; repair and menu are not. A second owner exits 2 before network access. Never lock the independent cloud uploader with the Telegram session lock. Lock files persist, but ownership is released by the OS on crash. Multiple GUI windows can inspect state; only one CLI can mutate a session.
+
+R5/R6: GUI `_active_root` is immutable during command execution. Track interactive Popen objects and wait for them in a background thread. Disable root editing while active. `_quit_from_tray` requests safe stop and `_finish_exit` uses Tk timers to await owned child, output reader and snapshot thread. Watchdog retries must honor exiting, stop sentinel and exit 2. Windows timeout fallback uses taskkill on only that owned PID tree, including PyInstaller wrappers. Do not block Tk on process waits. If no tray exists, Close must not leave an unrecoverable hidden window.
+
+R9: indexing consumes `iter_messages` through the same guarded async-iterator utility as download chunks. Every `__anext__` has a stoppable 180-second deadline; normal StopAsyncIteration is a successful empty scan. Index stalls propagate rather than being swallowed by the polling loop. Main idle/disk waits inspect index_task; batches inspect it once per second, cancel and await their workers before reconnecting the single shared client. Later batches continue and failed records remain resumable. Never create a separate index session.
+
+R3: purge re-runs cryptcheck immediately before hashing the original source, compares SHA-256 and size/mtime stability, marks archived, unlinks, then marks local_purged and appends manifest. Remote failure must leave local data and downloaded status untouched. A missing-local crash window uses lsjson --stat through crypt and requires current logical size before completing bookkeeping; it cannot claim a fresh plaintext hash. Remote check/delete are not a cross-service transaction: external cloud deletion after verification remains a residual race.
+
+R4/R10: daily backup exceptions become `backup.state=error` in the heartbeat and retry in 300 seconds; success clears the warning. Queue/heartbeat OSError and sqlite errors retry in 30 seconds, respecting stop; one-shot mode fails rather than looping. PID cleanup covers initialization too. Rclone subprocess logs always close/reap/unlink in finally, including spawn/stdin/stop failures; seek/read only the last 64 KiB. The GUI polls heartbeat age every ten seconds, warning at 120 seconds; recent heartbeat is not an upload-completion assertion. Manual recovery starts configured upload scripts without new services or startup entries.
+
+R7/R8: `restore_verify.restore_plan` requires an empty destination, verified manifest records, safe relative paths and collision-free targets. After rclone copy, verify exact file set, size and streamed SHA-256, then cryptcheck; failed results are retained for inspection. Upload and restore both use `--local-encoding None`. Restore ignores the upload stop sentinel because it is a separate manual operation. Credential saving writes only tool `credentials`, never HOME/.env.
+
+Manual launcher paths can be configured in the untracked sidecar `runtime-paths.json` with `archive_root` and `app_dir`; explicit script parameters take precedence. Preserve this private file during upgrades. New users otherwise default to their Downloads directory. PowerShell scripts must be UTF-8 with BOM for Windows PowerShell 5.1, especially Chinese script-name literals. `--background` hides the maintenance GUI to the tray without using mouse/keyboard. No startup task/service is created.
+
+Regression coverage is in `tests/test_review_fixes.py` plus the existing tests. Also validate x86_64 PE headers, ZIP CRC, unpacked frozen Python code privacy, installed hashes, consistent SQLite backup/mirror hashes, live part growth and fresh upload heartbeat after deployment. Do not infer all historical videos are fully decoded from these checks.
 
 ## Project goal
 
@@ -94,7 +116,7 @@ Known trap: converting existing Telegram Desktop `tdata` can fail with newer Tel
 Default archive root:
 
 ```text
-E:\电报视频导出_断点续传
+E:\TelegramArchive
 ```
 
 Inside it:
@@ -226,6 +248,27 @@ On Windows, logged GUI commands use `CREATE_NO_WINDOW` while keeping stdout/stde
 
 For GUI-launched `download` and `resume` commands, the watchdog setting restarts the last download command only when the subprocess exits with a non-zero status and the user did not press `Stop Running Command`. It schedules the restart on the Tk main thread via the output queue; do not call Tk widgets directly from the reader thread.
 
+### Continuous recovery invariants (0.1.6)
+
+- Never exit `--watch` merely because `stopped_for_space` is true. Use the same stoppable polling wait as cloud backpressure and check again after space is reclaimed. A normal exit code bypasses the GUI failure watchdog.
+- `await_network_progress` limits each connection/message/chunk await to 180 seconds and checks the safe-stop sentinel every second. It cancels and awaits the pending task before returning; never leave an old request writing alongside the replacement client. Do not use a total-video deadline or a file-growth watchdog during intentional disk/queue/idle waits.
+- `guarded_download_chunks` closes the Telethon iterator to release its borrowed sender. Use `contextlib.aclosing` at the consumer, including early safe-stop. Close operations are bounded to 30 seconds.
+- `run_download_batch` fails fast on `DownloadStalledError`, cancels and awaits sibling workers before closing SQLite and the shared client. Workers flush on file closure and record actual `.part` sizes. The batch handler cancels indexing, disconnects, waits 10 seconds, reconnects one client and restores indexing, then advances the existing pass cursor. Failed/cancelled records remain pending for the next pass: do not restart selection from the oldest permanently bad file forever. Startup/lookup stalls still use the outer watch retry; ordinary loop failures retain the polling delay.
+- Clean up a client cancelled during startup. Bound disconnect to 30 seconds. Incremental indexing continues to share the download client's session; never start a second session owner.
+- Validate known expected size before atomic `.part.replace(final)`; an unexpectedly short stream stays an error/partial file, not a cloud-uploadable completed file. Resume still aligns the real on-disk offset to the chunk boundary.
+- A scheduled GUI restart must recheck the external stop sentinel and manual-stop state. Never resurrect a task after a delayed safe-stop request.
+- Reader threads persist command start/output/exit and stop-request status using `RotatingFileHandler` (10 MiB, 3 backups, UTF-8). UI retention is 5,000 lines and drain work is capped at 200 messages per tick. This diagnoses child exits but cannot prove what externally killed the entire GUI.
+
+Frozen CLI stdout/stderr are explicitly configured as UTF-8 and line-buffered; `PYTHONUNBUFFERED` alone does not guarantee timely output from the frozen executable. Source mode retains the GUI's environment setting.
+
+The OpenList launcher verifies a daemon PID before invoking `openlist start`: remove only a stale marker (missing process or an unrelated executable). If the path cannot be inspected or a real OpenList process exists without a listener, fail without deleting the marker or killing a process. This prevents a dead daemon marker from blocking manual recovery. Tests mock native launch/listener calls, never run a real server or stop another process.
+
+Regression tests: `test_download_recovery.py` covers disk recovery, stalled requests, safe-stop cancellation, sibling cleanup, queue starvation and truncated streams; `test_gui_recovery.py` covers persistent logs and delayed watchdog cancellation; `test_openlist_launcher.py` covers stale/reused/live PID handling. The 0.1.6 suite contains 62 tests on Windows (three launcher tests are skipped elsewhere).
+
+Maintenance-launched background processes need independent lifetime. In this environment both normal `Start-Process` and Shell COM launches inherited a Windows job; `CREATE_BREAKAWAY_FROM_JOB` alone still left the test process in a job. A one-time `Win32_Process.Create` launch with `Win32_ProcessStartup.ShowWindow=0` produced a workflow whose GUI/CLI/uploader/OpenList all reported `IsProcessInJob=false`. This uses existing Windows management infrastructure, not a new service, task or startup item. Verify actual membership instead of assuming a launch flag detached the process. Historical evidence does not prove that a job closure caused the earlier termination.
+
+The original review is recorded in `reviews/2026-10-06-整体审查.md`. R1-R10 were addressed in 0.1.7; see `reviews/0.1.7-修复验收.md`. `scripts/review_probes.py` now runs isolated regression tests, never a second live Telegram session.
+
 The GUI accepts `--auto-resume` for managed recovery launches and `--auto-sync` for the manual continuous-archive launcher. `--auto-sync` forces `start_with_windows=false`, enables local pending polling and incremental indexing, saves the settings, then schedules `_resume_pending()` after the Tk loop starts.
 
 For GUI-managed download/resume stop, write `ArchivePaths.sync_stop_path` first. Only terminate after a 30-second timeout. Remove a stale sentinel immediately before starting a new download/resume command. Directly terminating first weakens the normal durability path, although chunk-aligned resume can recover a forced stop.
@@ -247,7 +290,7 @@ Current settings keys:
   "language": "zh",
   "theme": "dark",
   "workers": "4",
-  "root": "E:\\电报视频导出_断点续传",
+  "root": "E:\\TelegramArchive",
   "start_with_windows": false,
   "close_to_background": true,
   "watchdog_enabled": true,
@@ -326,9 +369,9 @@ Build:
 Expected output:
 
 ```text
-release/TelegramMediaArchive-0.1.5-windows-x86_64/
-release/TelegramMediaArchive-0.1.5-windows-x86_64.zip
-release/TelegramMediaArchive-0.1.5-source.zip
+release/TelegramMediaArchive-0.1.7-windows-x86_64/
+release/TelegramMediaArchive-0.1.7-windows-x86_64.zip
+release/TelegramMediaArchive-0.1.7-source.zip
 ```
 
 The portable folder must include:
@@ -363,7 +406,7 @@ Then add hidden imports to `scripts/build_release.ps1`.
 
 ## Manual smoke test after packaging
 
-1. Open `release\TelegramMediaArchive-0.1.5-windows-x86_64\TelegramMediaArchive.exe`.
+1. Open `release\TelegramMediaArchive-0.1.7-windows-x86_64\TelegramMediaArchive.exe`.
 2. Switch language to English and back to Chinese.
 3. Toggle dark mode.
 4. Visit each left navigation page and check that the buttons match the page purpose.
@@ -377,7 +420,7 @@ Then add hidden imports to `scripts/build_release.ps1`.
 12. Run:
 
    ```powershell
-   .\release\TelegramMediaArchive-0.1.5-windows-x86_64\TelegramMediaArchiveCLI.exe --help
+   .\release\TelegramMediaArchive-0.1.7-windows-x86_64\TelegramMediaArchiveCLI.exe --help
    ```
 
 Do not run login against a maintainer's personal account during generic release verification.

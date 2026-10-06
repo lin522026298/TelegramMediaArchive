@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
     [int]$TimeoutSeconds = 60
 )

@@ -16,19 +16,19 @@ class AppCoreTests(unittest.TestCase):
     def test_build_command_uses_current_python_and_archive_script(self):
         core = load_module()
         options = core.AppOptions(
-            root=Path(r"E:\电报视频导出_断点续传"),
+            root=Path(r"E:\TelegramArchive"),
             script_path=Path(r"C:\work\tg_media_archive.py"),
             python_exe=Path(sys.executable),
         )
 
         command = core.build_command(options, "summary")
 
-        self.assertEqual(command, [str(Path(sys.executable)), r"C:\work\tg_media_archive.py", "--root", r"E:\电报视频导出_断点续传", "summary"])
+        self.assertEqual(command, [str(Path(sys.executable)), r"C:\work\tg_media_archive.py", "--root", r"E:\TelegramArchive", "summary"])
 
     def test_build_download_command_includes_date_range_kind_limit_and_workers(self):
         core = load_module()
         options = core.AppOptions(
-            root=Path(r"E:\电报视频导出_断点续传"),
+            root=Path(r"E:\TelegramArchive"),
             script_path=Path(r"C:\work\tg_media_archive.py"),
             python_exe=Path(sys.executable),
         )
@@ -49,7 +49,7 @@ class AppCoreTests(unittest.TestCase):
                 str(Path(sys.executable)),
                 r"C:\work\tg_media_archive.py",
                 "--root",
-                r"E:\电报视频导出_断点续传",
+                r"E:\TelegramArchive",
                 "download",
                 "--from",
                 "2023-09-01",
@@ -69,7 +69,7 @@ class AppCoreTests(unittest.TestCase):
     def test_build_resume_command_includes_limit_and_workers(self):
         core = load_module()
         options = core.AppOptions(
-            root=Path(r"E:\电报视频导出_断点续传"),
+            root=Path(r"E:\TelegramArchive"),
             script_path=Path(r"C:\work\tg_media_archive.py"),
             python_exe=Path(sys.executable),
         )
@@ -82,7 +82,7 @@ class AppCoreTests(unittest.TestCase):
                 str(Path(sys.executable)),
                 r"C:\work\tg_media_archive.py",
                 "--root",
-                r"E:\电报视频导出_断点续传",
+                r"E:\TelegramArchive",
                 "resume",
                 "--min-free-gb",
                 "20",
@@ -253,11 +253,11 @@ class AppCoreTests(unittest.TestCase):
 
         script = core.startup_script_text(
             Path(r"D:\Tools\TelegramMediaArchive\TelegramMediaArchive.exe"),
-            Path(r"E:\电报视频导出_断点续传"),
+            Path(r"E:\TelegramArchive"),
         )
 
         self.assertIn('start "" "D:\\Tools\\TelegramMediaArchive\\TelegramMediaArchive.exe"', script)
-        self.assertIn('--root "E:\\电报视频导出_断点续传"', script)
+        self.assertIn('--root "E:\\TelegramArchive"', script)
 
     def test_startup_shortcut_path_uses_appdata(self):
         core = load_module()
@@ -272,7 +272,7 @@ class AppCoreTests(unittest.TestCase):
     def test_build_login_official_command_includes_phone(self):
         core = load_module()
         options = core.AppOptions(
-            root=Path(r"E:\电报视频导出_断点续传"),
+            root=Path(r"E:\TelegramArchive"),
             script_path=Path(r"C:\work\tg_media_archive.py"),
             python_exe=Path(sys.executable),
         )
@@ -285,7 +285,7 @@ class AppCoreTests(unittest.TestCase):
                 str(Path(sys.executable)),
                 r"C:\work\tg_media_archive.py",
                 "--root",
-                r"E:\电报视频导出_断点续传",
+                r"E:\TelegramArchive",
                 "login-official",
                 "--phone",
                 "+10000000000",
@@ -316,7 +316,7 @@ class AppCoreTests(unittest.TestCase):
 
     def test_state_paths_are_under_selected_root_not_desktop_export(self):
         core = load_module()
-        root = Path(r"E:\电报视频导出_断点续传")
+        root = Path(r"E:\TelegramArchive")
 
         paths = core.archive_paths(root)
 

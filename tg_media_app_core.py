@@ -11,7 +11,7 @@ from pathlib import Path
 from tg_media_archive import DEFAULT_MIN_FREE_GB, DEFAULT_ROOT
 
 
-APP_VERSION = "0.1.5"
+APP_VERSION = "0.1.7"
 VALID_KINDS = {"all", "photo", "video"}
 MAX_WORKERS = 8
 DEFAULT_WORKERS = "4"
@@ -247,6 +247,21 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 }
 
 
+TRANSLATIONS["en"].update({
+    "cloud_base_dir": "Cloud sidecar directory (optional)",
+    "start_cloud": "Start / Recover Uploads",
+    "cloud_not_configured": "Select the configured cloud sidecar directory first.",
+    "cloud_status": "Encrypted upload", "cloud_recent": "Recent heartbeat", "cloud_stale": "Stopped or stale heartbeat; check logs / recover",
+    "cloud_pending": "Pending upload", "cloud_backup": "Uploader daily backup",
+})
+TRANSLATIONS["zh"].update({
+    "cloud_base_dir": "云中转工具目录（可留空）", "start_cloud": "启动 / 恢复上传",
+    "cloud_not_configured": "请先选择已经完成授权配置的云中转工具目录。",
+    "cloud_status": "加密上传", "cloud_recent": "心跳近期更新", "cloud_stale": "已停或心跳过期，请检查日志或恢复上传",
+    "cloud_pending": "待上传数据", "cloud_backup": "上传器每日备份",
+})
+
+
 @dataclass(frozen=True)
 class AppSettings:
     language: str = "zh"
@@ -262,6 +277,7 @@ class AppSettings:
     index_interval: str = DEFAULT_INDEX_INTERVAL
     daily_backup_enabled: bool = True
     snapshot_mirror_dir: str = ""
+    cloud_base_dir: str = ""
 
 
 @dataclass(frozen=True)
@@ -420,6 +436,7 @@ def normalize_settings(settings: AppSettings) -> AppSettings:
         index_interval=index_interval,
         daily_backup_enabled=_bool_from_value(settings.daily_backup_enabled, True),
         snapshot_mirror_dir=settings.snapshot_mirror_dir.strip(),
+        cloud_base_dir=settings.cloud_base_dir.strip(),
     )
 
 
@@ -444,6 +461,7 @@ def load_app_settings(path: Path | None = None) -> AppSettings:
             index_interval=str(data.get("index_interval", DEFAULT_INDEX_INTERVAL)),
             daily_backup_enabled=_bool_from_value(data.get("daily_backup_enabled"), True),
             snapshot_mirror_dir=str(data.get("snapshot_mirror_dir", "")),
+            cloud_base_dir=str(data.get("cloud_base_dir", "")),
         )
     )
 

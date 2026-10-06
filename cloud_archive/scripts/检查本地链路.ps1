@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
     [switch]$TestRemote
 )

@@ -1,12 +1,13 @@
-param(
+﻿param(
     [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
-    [string]$AppDir = "D:\Tools\TelegramMediaArchive",
-    [string]$ArchiveRoot = "E:\电报视频导出_断点续传",
+    [string]$AppDir = "",
+    [string]$ArchiveRoot = "",
     [int]$TelegramTimeoutSeconds = 90,
     [int]$UploaderTimeoutSeconds = 120
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $ArchiveRoot -or -not $AppDir) { . (Join-Path $PSScriptRoot "读取运行路径.ps1") -BaseDir $BaseDir }
 $CliExe = Join-Path $AppDir "TelegramMediaArchiveCLI.exe"
 $TelegramStopFile = Join-Path $ArchiveRoot "state\STOP_TELEGRAM_SYNC"
 $StopUploader = Join-Path $PSScriptRoot "停止加密上传.ps1"

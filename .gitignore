@@ -19,3 +19,12 @@ logs/
 *.sqlite3-shm
 *.sqlite3-wal
 config.json
+.env
+*.env
+*.key
+credentials/
+manifests/
+state-backups/
+pilot-test/
+config/
+runtime-paths.json
