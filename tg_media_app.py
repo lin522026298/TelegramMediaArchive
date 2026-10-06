@@ -305,13 +305,16 @@ class TelegramArchiveApp(tk.Tk):
             ("resume_pending", self._resume_pending),
             ("month_summary", lambda: self._run_logged("summary")),
             ("verify_files", lambda: self._run_logged("verify")),
-            ("open_download_folder", lambda: self._open_path(archive_paths(self._root_path()).media_dir)),
-            ("open_state", lambda: self._open_path(archive_paths(self._root_path()).state_dir)),
-            ("open_snapshots", lambda: self._open_path(archive_paths(self._root_path()).snapshots_dir)),
-            ("open_logs", lambda: self._open_path(archive_paths(self._root_path()).log_dir)),
         ]
         for row, (key, command) in enumerate(actions, start=1):
-            self._register_text(ttk.Button(quick_card, command=command), key).grid(row=row, column=0, sticky="ew", pady=5)
+            self._register_text(ttk.Button(quick_card, command=command), key).grid(row=row, column=0, sticky="ew", pady=4)
+        folders = self._register_text(ttk.Menubutton(quick_card), "folders")
+        folders.grid(row=4, column=0, sticky="ew", pady=5)
+        self.folder_menu = tk.Menu(folders, tearoff=False)
+        self.folder_menu_keys = ("open_download_folder", "open_state", "open_snapshots", "open_logs")
+        for key, field in zip(self.folder_menu_keys, ("media_dir", "state_dir", "snapshots_dir", "log_dir")):
+            self.folder_menu.add_command(label=self._t(key), command=lambda name=field: self._open_path(getattr(archive_paths(self._root_path()), name)))
+        folders.configure(menu=self.folder_menu)
 
     def _build_download_page(self, parent: ttk.Frame) -> None:
         card = self._card(parent, "download_options")
@@ -357,8 +360,18 @@ class TelegramArchiveApp(tk.Tk):
 
     def _build_settings_page(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
-        parent.columnconfigure(1, weight=1)
-        appearance = self._card(parent, "appearance")
+        parent.rowconfigure(0, weight=1)
+        self.settings_tabs = ttk.Notebook(parent)
+        self.settings_tabs.grid(row=0, column=0, sticky="nsew")
+        sections = {}
+        for key in ("general_settings", "automation", "data_safety", "cloud_status"):
+            frame = ttk.Frame(self.settings_tabs, style="Root.TFrame", padding=12)
+            frame.columnconfigure(0, weight=1)
+            self.settings_tabs.add(frame, text=self._t(key))
+            sections[key] = frame
+        general = sections["general_settings"]
+        general.columnconfigure(1, weight=1)
+        appearance = self._card(general, "appearance")
         appearance.grid(row=0, column=0, sticky="new", padx=(0, 8), pady=(0, 12))
         appearance.columnconfigure(0, weight=1)
         self._register_text(ttk.Label(appearance), "language").grid(row=1, column=0, sticky="w")
@@ -374,7 +387,7 @@ class TelegramArchiveApp(tk.Tk):
             row=3, column=0, sticky="w", pady=4
         )
 
-        behavior = self._card(parent, "behavior")
+        behavior = self._card(general, "behavior")
         behavior.grid(row=0, column=1, sticky="new", padx=(8, 0), pady=(0, 12))
         behavior.columnconfigure(0, weight=1)
         self._register_text(ttk.Checkbutton(behavior, variable=self.close_background_var, command=self._save_settings), "close_to_background").grid(
@@ -384,8 +397,8 @@ class TelegramArchiveApp(tk.Tk):
             row=2, column=0, sticky="w", pady=4
         )
 
-        automation = self._card(parent, "automation")
-        automation.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        automation = self._card(sections["automation"], "automation")
+        automation.grid(row=0, column=0, sticky="ew")
         automation.columnconfigure(0, weight=1)
         automation.columnconfigure(1, weight=1)
         self._register_text(ttk.Checkbutton(automation, variable=self.watchdog_var, command=self._save_settings), "watchdog_enabled").grid(
@@ -403,8 +416,8 @@ class TelegramArchiveApp(tk.Tk):
             row=6, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
 
-        data_safety = self._card(parent, "data_safety")
-        data_safety.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        data_safety = self._card(sections["data_safety"], "data_safety")
+        data_safety.grid(row=0, column=0, sticky="ew")
         data_safety.columnconfigure(0, weight=1)
         self._register_text(
             ttk.Checkbutton(data_safety, variable=self.daily_backup_var, command=self._save_settings),
@@ -425,15 +438,21 @@ class TelegramArchiveApp(tk.Tk):
         self._register_text(ttk.Label(data_safety, style="Muted.TLabel"), "snapshot_note").grid(
             row=4, column=0, columnspan=3, sticky="w", pady=(10, 2)
         )
-        self._register_text(ttk.Label(data_safety), "cloud_base_dir").grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 4))
-        ttk.Entry(data_safety, textvariable=self.cloud_base_var).grid(row=6, column=0, sticky="ew", padx=(0, 8))
-        self._register_text(ttk.Button(data_safety, command=self._browse_cloud_base), "browse").grid(row=6, column=1, padx=4)
-        self._register_text(ttk.Button(data_safety, command=self._start_cloud), "start_cloud").grid(row=6, column=2, padx=4)
-        self._register_text(ttk.Button(data_safety, command=self._save_settings, style="Accent.TButton"), "save_settings").grid(
-            row=5, column=0, sticky="w", pady=(12, 0)
+        cloud = self._card(sections["cloud_status"], "cloud_status")
+        cloud.grid(row=0, column=0, sticky="ew")
+        cloud.columnconfigure(0, weight=1)
+        self._register_text(ttk.Label(cloud), "cloud_base_dir").grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 4))
+        ttk.Entry(cloud, textvariable=self.cloud_base_var).grid(row=2, column=0, sticky="ew", padx=(0, 8))
+        self._register_text(ttk.Button(cloud, command=self._browse_cloud_base), "browse").grid(row=2, column=1, padx=4)
+        self._register_text(ttk.Button(cloud, command=self._start_cloud), "start_cloud").grid(row=2, column=2, padx=4)
+        actions = ttk.Frame(parent, style="Root.TFrame")
+        actions.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        actions.columnconfigure(0, weight=1)
+        self._register_text(ttk.Button(actions, command=self._save_settings, style="Accent.TButton"), "save_settings").grid(
+            row=0, column=0, sticky="w"
         )
-        self._register_text(ttk.Button(data_safety, command=self._restore_defaults), "restore_defaults").grid(
-            row=5, column=2, sticky="e", pady=(12, 0)
+        self._register_text(ttk.Button(actions, command=self._restore_defaults), "restore_defaults").grid(
+            row=0, column=1, sticky="e"
         )
 
     def _build_help_page(self, parent: ttk.Frame) -> None:
@@ -456,7 +475,11 @@ class TelegramArchiveApp(tk.Tk):
 
     def _show_page(self, page: str) -> None:
         self.current_page = page
-        self._pages[page].tkraise()
+        for name, frame in self._pages.items():
+            if name == page:
+                frame.grid()
+            else:
+                frame.grid_remove()
         self.page_title.configure(text=self._t(f"nav_{page}") if page != "dashboard" else self._t("dashboard_title"))
         for name, button in self._nav_buttons.items():
             button.configure(style="NavSelected.TButton" if name == page else "Nav.TButton")
@@ -543,6 +566,10 @@ class TelegramArchiveApp(tk.Tk):
         self.title(self._t("app_title"))
         for widget, key in self._i18n_widgets:
             widget.configure(text=self._t(key))
+        for index, key in enumerate(("general_settings", "automation", "data_safety", "cloud_status")):
+            self.settings_tabs.tab(index, text=self._t(key))
+        for index, key in enumerate(self.folder_menu_keys):
+            self.folder_menu.entryconfigure(index, label=self._t(key))
         self._show_page(self.current_page)
         if self.status_var.get() in {"Ready", "就绪", ""}:
             self.status_var.set(self._t("ready"))
@@ -560,6 +587,9 @@ class TelegramArchiveApp(tk.Tk):
         style.configure("Root.TFrame", background=palette["bg"])
         style.configure("Sidebar.TFrame", background=palette["sidebar"])
         style.configure("Card.TFrame", background=palette["surface"], relief="flat")
+        style.configure("TNotebook", background=palette["bg"], borderwidth=0)
+        style.configure("TNotebook.Tab", background=palette["surface_alt"], foreground=palette["fg"], padding=(14, 8))
+        style.map("TNotebook.Tab", background=[("selected", palette["accent_soft"])], foreground=[("selected", palette["fg"])])
         style.configure("AppTitle.TLabel", font=("Segoe UI Semibold", 16), background=palette["sidebar"], foreground=palette["fg"])
         style.configure("PageTitle.TLabel", font=("Segoe UI Semibold", 20), background=palette["bg"], foreground=palette["fg"])
         style.configure("CardTitle.TLabel", font=("Segoe UI Semibold", 12), background=palette["surface"], foreground=palette["fg"])
@@ -570,6 +600,8 @@ class TelegramArchiveApp(tk.Tk):
         style.configure("TEntry", fieldbackground=palette["surface_alt"], foreground=palette["fg"], insertcolor=palette["fg"], padding=7)
         style.configure("TCombobox", fieldbackground=palette["surface_alt"], foreground=palette["fg"], padding=7)
         style.configure("TButton", padding=(12, 8), background=palette["surface_alt"], foreground=palette["fg"], bordercolor=palette["border"])
+        style.configure("TMenubutton", padding=(12, 8), background=palette["surface_alt"], foreground=palette["fg"])
+        self.folder_menu.configure(bg=palette["surface"], fg=palette["fg"], activebackground=palette["accent_soft"], activeforeground=palette["fg"])
         style.configure("Accent.TButton", padding=(12, 8), background=palette["accent"], foreground="#ffffff")
         style.configure("Nav.TButton", anchor="w", padding=(14, 11), background=palette["sidebar"], foreground=palette["fg"], borderwidth=0)
         style.configure("NavSelected.TButton", anchor="w", padding=(14, 11), background=palette["accent_soft"], foreground=palette["fg"], borderwidth=0)

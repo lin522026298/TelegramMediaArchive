@@ -241,6 +241,28 @@ class ReviewFixTests(unittest.TestCase):
             heartbeat.unlink()
             self.assertIn("stale", cloud_status_lines(base, "en")[0])
 
+    @unittest.skipUnless(os.name == "nt", "Local hidden Tk layout check")
+    def test_settings_tabs_and_menus_fit_default_window_in_both_languages(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(TelegramArchiveApp, "_setup_tray_if_available"):
+            app = TelegramArchiveApp(Path(tmp))
+            app.withdraw()
+            try:
+                for language in ("中文", "English"):
+                    app.language_var.set(language)
+                    app._apply_language()
+                    for dark in (False, True):
+                        app.dark_var.set(dark)
+                        app._apply_theme()
+                        for page in ("dashboard", "settings"):
+                            app._show_page(page)
+                            app.update_idletasks()
+                            height = int(app.geometry().split("x")[1].split("+")[0])
+                            self.assertLessEqual(app.winfo_reqheight(), height)
+                self.assertEqual(len(app.settings_tabs.tabs()), 4)
+                self.assertEqual(app.folder_menu.index("end"), 3)
+            finally:
+                app.destroy()
+
     @unittest.skipUnless(os.name == "nt", "Windows PowerShell only")
     def test_runtime_path_loader_preserves_explicit_arguments(self):
         with tempfile.TemporaryDirectory() as tmp:

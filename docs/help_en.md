@@ -125,6 +125,8 @@ Use `停止连续归档.cmd` before shutdown or a planned pause. These launchers
 
 ## Safety and Cloud Recovery in 0.1.7
 
+Settings uses four tabs: General, Automation, Data Safety, and Encrypted Upload. The dashboard Folders menu opens media, state, snapshots and logs. Tabs and folder menus follow language and theme changes.
+
 - Each archive directory is permanently bound to one group. Legacy single-group databases bind in place without renaming files or partial downloads. Choose a fresh directory for a different group. Mixed-group databases fail closed.
 - Only one Telegram session command can own a directory. Interactive login/selection terminals are tracked too. Other windows can inspect state, but concurrent session commands are refused. Never delete a lock file to bypass the lock.
 - Active tasks retain their original root. Root changes are disabled while running. A true Quit safely stops owned downloads and waits asynchronously for processes, output and backups. The 30-second fallback terminates only the owned process tree. Close-to-background needs a working tray icon; closing the GUI does not stop an independent uploader.

@@ -248,6 +248,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
 
 
 TRANSLATIONS["en"].update({
+    "general_settings": "General",
+    "folders": "Folders",
     "cloud_base_dir": "Cloud sidecar directory (optional)",
     "start_cloud": "Start / Recover Uploads",
     "cloud_not_configured": "Select the configured cloud sidecar directory first.",
@@ -255,6 +257,8 @@ TRANSLATIONS["en"].update({
     "cloud_pending": "Pending upload", "cloud_backup": "Uploader daily backup",
 })
 TRANSLATIONS["zh"].update({
+    "general_settings": "通用",
+    "folders": "文件夹",
     "cloud_base_dir": "云中转工具目录（可留空）", "start_cloud": "启动 / 恢复上传",
     "cloud_not_configured": "请先选择已经完成授权配置的云中转工具目录。",
     "cloud_status": "加密上传", "cloud_recent": "心跳近期更新", "cloud_stale": "已停或心跳过期，请检查日志或恢复上传",
