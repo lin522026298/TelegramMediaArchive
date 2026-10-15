@@ -11,7 +11,7 @@ from pathlib import Path
 from tg_media_archive import DEFAULT_MIN_FREE_GB, DEFAULT_ROOT
 
 
-APP_VERSION = "0.1.7"
+APP_VERSION = "0.1.8"
 VALID_KINDS = {"all", "photo", "video"}
 MAX_WORKERS = 8
 DEFAULT_WORKERS = "4"

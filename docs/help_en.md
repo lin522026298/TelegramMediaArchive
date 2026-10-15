@@ -4,6 +4,7 @@ This app downloads photos and videos from a Telegram group or channel to local s
 
 ## What to know first
 
+- Since 0.1.8, photo indexing and downloads use the same explicit representation. Old photo partials of unknown origin are preserved under `state/photo-quarantine` before a clean photo download. Video partials are unchanged. Newly identified same-version photo partials resume normally. Quarantined bytes are local safety copies, not final media; they are not automatically uploaded or deleted.
 - The default archive root is your `Downloads\TelegramMediaArchive` directory. Existing installations retain their saved root. Change it only when no command is running.
 - `state` stores config, Telegram sessions, and the SQLite database. It is sensitive. Do not share it or commit it.
 - `media` stores downloaded photos and videos.

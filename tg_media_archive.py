@@ -19,7 +19,8 @@ import sqlite3
 import sys
 import time
 import threading
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time as day_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -88,6 +89,74 @@ class MediaRecord:
     @property
     def key(self) -> MediaKey:
         return MediaKey(self.chat_id, self.message_id, self.media_index)
+
+
+@dataclass(frozen=True)
+class PhotoVariant:
+    photo_id: int
+    thumb_type: str
+    size: int
+    cached_data: bytes | None = None
+
+    @property
+    def identity(self) -> str:
+        return json.dumps([self.photo_id, self.thumb_type, self.size], separators=(",", ":"))
+
+
+def select_photo_variant(photo: Any) -> PhotoVariant:
+    network = []
+    cached = []
+    for item in photo.sizes:
+        kind = type(item).__name__
+        if kind == "PhotoSize":
+            size = int(item.size)
+            network.append(PhotoVariant(int(photo.id), item.type, size))
+        elif kind == "PhotoSizeProgressive" and item.sizes:
+            network.append(PhotoVariant(int(photo.id), item.type, max(item.sizes)))
+        elif kind in ("PhotoCachedSize", "PhotoStrippedSize"):
+            data = item.bytes
+            if kind == "PhotoStrippedSize":
+                from telethon.utils import stripped_photo_to_jpg
+
+                data = stripped_photo_to_jpg(data)
+            cached.append(PhotoVariant(int(photo.id), item.type, len(data), data))
+    candidates = [item for item in (network or cached) if item.size > 0]
+    if not candidates:
+        raise ValueError("Photo has no supported nonempty image representation")
+    return max(candidates, key=lambda item: (item.size, item.thumb_type))
+
+
+def prepare_photo_source(root: Path, db: ArchiveDB, record: MediaRecord, variant: PhotoVariant, final_path: Path, part_path: Path) -> None:
+    row = db.conn.execute(
+        "select identity from photo_download_sources where chat_id=? and message_id=? and media_index=?",
+        (record.chat_id, record.message_id, record.media_index),
+    ).fetchone()
+    if row is None or row[0] != variant.identity:
+        existing = [path for path in (final_path, part_path) if path.exists()]
+        if existing:
+            quarantine = state_dir(root) / "photo-quarantine" / uuid.uuid4().hex
+            quarantine.mkdir(parents=True)
+            manifest = {
+                "reason": "unknown-or-changed-photo-source",
+                "old_identity": row[0] if row else None,
+                "new_identity": variant.identity,
+                "files": {str(index): path.relative_to(root).as_posix() for index, path in enumerate(existing)},
+            }
+            # Write provenance before moving; a crash must never turn old bytes into new-version bytes.
+            (quarantine / "provenance.json").write_text(json.dumps(manifest), encoding="utf-8")
+            for index, path in enumerate(existing):
+                path.replace(quarantine / str(index))
+            print("Preserved unknown/changed photo bytes in state/photo-quarantine; downloading a verified version.")
+    with db._lock:
+        with db.conn:
+            db.conn.execute(
+                "insert into photo_download_sources values (?,?,?,?) on conflict(chat_id,message_id,media_index) do update set identity=excluded.identity",
+                (record.chat_id, record.message_id, record.media_index, variant.identity),
+            )
+            db.conn.execute(
+                "update media set size=? where chat_id=? and message_id=? and media_index=?",
+                (variant.size, record.chat_id, record.message_id, record.media_index),
+            )
 
 
 @dataclass(frozen=True)
@@ -229,6 +298,13 @@ class ArchiveDB:
             create table if not exists settings (
                 key text primary key,
                 value text not null
+            );
+            create table if not exists photo_download_sources (
+                chat_id integer not null,
+                message_id integer not null,
+                media_index integer not null,
+                identity text not null,
+                primary key (chat_id, message_id, media_index)
             );
             """
         )
@@ -576,6 +652,8 @@ def message_media_record(chat_id: int, message: Any) -> MediaRecord | None:
         return None
     file_name = getattr(file_info, "name", None) or f"{kind}_{message.id}{ext or ('.jpg' if kind == 'photo' else '.mp4')}"
     size = getattr(file_info, "size", None)
+    if getattr(message, "photo", None):
+        size = select_photo_variant(message.photo).size
     if size is not None:
         size = int(size)
     return MediaRecord(
@@ -846,7 +924,7 @@ async def download_one(
     part_path = final_path.with_name(final_path.name + ".part")
     final_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if final_path.exists() and (record.size is None or final_path.stat().st_size == record.size):
+    if record.kind != "photo" and final_path.exists() and (record.size is None or final_path.stat().st_size == record.size):
         db.mark_downloaded(record.key, rel_path.as_posix(), final_path.stat().st_size)
         print(f"skip existing {rel_path}")
         return True
@@ -865,6 +943,26 @@ async def download_one(
         print(f"missing media msg={record.message_id}")
         return False
 
+    download_location = message.media
+    download_options = {}
+    photo_variant = None
+    if getattr(message, "photo", None):
+        from telethon.tl.types import InputPhotoFileLocation
+
+        photo = message.photo
+        photo_variant = select_photo_variant(photo)
+        prepare_photo_source(root, db, record, photo_variant, final_path, part_path)
+        record = replace(record, size=photo_variant.size)
+        download_location = InputPhotoFileLocation(
+            id=photo.id, access_hash=photo.access_hash,
+            file_reference=photo.file_reference, thumb_size=photo_variant.thumb_type,
+        )
+        download_options["dc_id"] = photo.dc_id
+    if final_path.exists() and (record.size is None or final_path.stat().st_size == record.size):
+        db.mark_downloaded(record.key, rel_path.as_posix(), final_path.stat().st_size)
+        print(f"skip existing {rel_path}")
+        return True
+
     offset = resume_offset(part_path, chunk_size)
     if part_path.exists() and part_path.stat().st_size != offset:
         with part_path.open("r+b") as handle:
@@ -878,13 +976,19 @@ async def download_one(
 
     try:
         with part_path.open(mode) as handle:
-            iterator = client.iter_download(
-                message.media,
-                offset=offset,
-                chunk_size=chunk_size,
-                request_size=chunk_size,
-                file_size=record.size,
-            )
+            if photo_variant is not None and photo_variant.cached_data is not None:
+                async def cached_chunks():
+                    yield photo_variant.cached_data[offset:]
+                iterator = cached_chunks()
+            else:
+                iterator = client.iter_download(
+                    download_location,
+                    offset=offset,
+                    chunk_size=chunk_size,
+                    request_size=chunk_size,
+                    file_size=record.size,
+                    **download_options,
+                )
             async with contextlib.aclosing(guarded_download_chunks(iterator, root)) as chunks:
                 async for chunk in chunks:
                     if not chunk:

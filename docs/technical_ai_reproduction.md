@@ -2,6 +2,16 @@
 
 This document is written for future agents and maintainers. It explains how to reproduce the project, avoid known traps, and produce release artifacts.
 
+## 0.1.8 Photo representation contract
+
+Telethon 1.43.2 `File.size` for a Photo takes the largest byte count, while low-level `utils._get_file_info(Photo)` selects `sizes[-1]`. These can represent different JPEGs. Never disable length validation or treat successful JPEG decode as proof of the selected representation. `select_photo_variant` chooses a positive-size PhotoSize/PhotoSizeProgressive by maximum bytes with a stable type tie-break; progressive byte count is max(sizes). Only if no network image exists, use cached/stripped bytes (stripped bytes require Telethon JPEG expansion). Exclude empty/path/video entries.
+
+Index with that size. Before downloading a native Photo, refetch its metadata, select again, update the pending record size, and pass an explicit InputPhotoFileLocation with thumb_size, dc_id and the matching file_size to iter_download. Keep the exact completion check. Image documents are full documents, not native Photo thumbnails. Existing final/path naming and video resume are unchanged.
+
+The additive SQLite table `photo_download_sources` stores identity `[photo_id, thumb_type, size]` only when preparation for download succeeds; indexing must not certify legacy part provenance. If identity is missing/different, preserve any existing pending final and part under `state/photo-quarantine/<random-id>/` with provenance before recording the new identity. Never concatenate unknown bytes, infer provenance from byte length, or purge quarantine automatically. Reopening with the same stored identity does not quarantine again. A move failure leaves the identity unchanged; retry may continue moving remaining legacy files. Secrets/runtime data stay out of Git and packages. Already archived files are not silently redownloaded or claimed as revalidated.
+
+Tests: `tests/test_photo_versions.py`, full unittest discovery, locked Windows build. Genuine Telegram metadata and end-to-end checks use the one existing session only after safely stopping its current owner. Keep videos' existing part prefixes; snapshot databases before deployment. Do not confuse upstream GetFileRequest timeouts with the deterministic representation mismatch.
+
 ## 0.1.7 Implementation Contract
 
 Release baseline: CPython 3.11.9 Windows x86_64, dependencies in `requirements-lock-windows.txt`, external binary hashes in `cloud_archive/第三方版本锁定.json`. Install the lock with pip, run unittest discovery, commit sanitized sources, then run `scripts/build_release.ps1`. The source ZIP is `git archive HEAD`, not a filesystem copy. An uncommitted tree is rejected to avoid source/EXE mismatches. Do not stage runtime data; run `scripts/privacy_audit.py` with optional local archive/cloud paths before publishing. Private scan values are never printed.

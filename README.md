@@ -12,7 +12,7 @@
 
 该目录下的 `state` 会保存 `config.json`、Telegram `.session` 和 SQLite 状态库；`media` 保存实际下载文件；`logs` 保存日志。这些都是本地状态和敏感信息，不应提交到 git。
 
-0.1.7 已修复整体审查的 R1–R10：单目录单群绑定、会话互斥、安全退出、删除前云端复验、备份故障隔离、索引超时恢复、恢复结果校验与凭证隔离。详见 [修复验收说明](docs/reviews/0.1.7-修复验收.md)。云中转和下载解耦；不会默认添加开机项。
+0.1.8 修复 Telegram 图片大小与下载版本不一致：显式选择同一图片版本，持久记录来源，未知来源旧图片断点隔离保留，不关闭大小校验。详见 [图片修复说明](docs/reviews/0.1.8-图片版本修复.md)。0.1.7 的 R1–R10 修复继续保留，云中转和下载解耦；不会默认添加开机项。
 
 ## 安装
 
@@ -205,9 +205,9 @@ python -m venv .venv
 输出文件：
 
 ```text
-release\TelegramMediaArchive-0.1.7-source.zip
-release\TelegramMediaArchive-0.1.7-windows-x86_64.zip
-release\TelegramMediaArchive-0.1.7-windows-x86_64\
+release\TelegramMediaArchive-0.1.8-source.zip
+release\TelegramMediaArchive-0.1.8-windows-x86_64.zip
+release\TelegramMediaArchive-0.1.8-windows-x86_64\
 ```
 
 便携包里包含：
