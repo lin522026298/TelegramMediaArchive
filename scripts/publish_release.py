@@ -43,7 +43,7 @@ def main() -> int:
         release = request(api + "/releases/tags/" + urllib.parse.quote(args.tag))
     except urllib.error.HTTPError as exc:
         if exc.code != 404: raise
-        release = request(api + "/releases", "POST", {"tag_name": args.tag, "target_commitish": args.commit, "name": "TelegramMediaArchive " + args.tag, "body": "Whole-project review fixes R1-R10. Windows x86_64 portable application and sanitized source. Preserves existing sessions and resumable files; no default startup entry. See docs/reviews/0.1.7-修复验收.md. Packages contain no local archive, credentials, manifests or personal media names.", "draft": False, "prerelease": False})
+        release = request(api + "/releases", "POST", {"tag_name": args.tag, "target_commitish": args.commit, "name": "TelegramMediaArchive " + args.tag, "body": "Windows x86_64 portable application and sanitized source. See README and docs/reviews for version-specific fixes, compatibility and verification. Preserves existing sessions; no default startup entry. Packages contain no local archive, credentials, manifests or personal media names.", "draft": False, "prerelease": False})
     assets = {item["name"]: item for item in release.get("assets", [])}
     for path in args.asset:
         data = path.read_bytes()
