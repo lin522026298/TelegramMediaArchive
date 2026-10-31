@@ -1,5 +1,12 @@
 # Telegram Media Archive Help
 
+## 0.1.9 Scheduling and Rechecks
+
+- Idle worker slots immediately start the next item in the original date/message order. Filenames and per-file partials are unchanged; concurrent completion order may differ.
+- Ordinary failures back off from 5 minutes to at most 6 hours; empty messages/no-media observations recheck after 24 hours, explicit access errors after 1 hour. Cooldowns survive restart; records and partials are never deleted by this policy.
+- Download page: `Retry Cooled Errors` releases existing cooldowns once; new failures still back off. `Recheck Unavailable Media` only inspects raw message responses. Stop the current command first; no new login is needed. An empty response does not prove why a message disappeared.
+- Bounded `runtime-cli.jsonl`, `runtime-gui.jsonl`, and `runtime-uploader.jsonl` logs independently record lifecycle/progress. Missing exit evidence is not proof of a particular cause. The manual workflow launcher escapes a maintenance Windows Job when needed, without services, scheduled tasks or startup entries. A stopped computer or externally terminated entire workflow still needs manual startup.
+
 This app downloads photos and videos from a Telegram group or channel to local storage. It is designed for long-running, resumable archiving, not for reading chats.
 
 ## What to know first

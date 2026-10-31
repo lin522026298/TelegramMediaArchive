@@ -38,6 +38,7 @@ from tg_media_app_core import (
     window_dimensions,
 )
 from tg_media_archive import DEFAULT_ROOT
+from runtime_events import RuntimeJournal, runtime_event
 
 
 def enable_dpi_awareness() -> None:
@@ -100,8 +101,10 @@ def cloud_status_lines(base: Path, language: str) -> list[str]:
 
 
 class TelegramArchiveApp(tk.Tk):
-    def __init__(self, initial_root: Path | None = None) -> None:
+    def __init__(self, initial_root: Path | None = None, *, background: bool = False) -> None:
         super().__init__()
+        if background:
+            self.withdraw()
         self.settings = load_app_settings()
         self.script_path = Path(__file__).with_name("tg_media_archive.py")
         self.app_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else self.script_path.parent
@@ -338,6 +341,8 @@ class TelegramArchiveApp(tk.Tk):
         )
         self._register_text(ttk.Button(card, command=lambda: self._run_logged("verify")), "verify_files").grid(row=5, column=2, sticky="ew", padx=8, pady=4)
         self._register_text(ttk.Button(card, command=lambda: self._run_logged("summary")), "month_summary").grid(row=5, column=3, sticky="ew", padx=(8, 0), pady=4)
+        self._register_text(ttk.Button(card, command=lambda: self._resume_pending(retry_errors=True)), "retry_errors").grid(row=6, column=0, columnspan=2, sticky="ew", padx=(0, 8), pady=4)
+        self._register_text(ttk.Button(card, command=lambda: self._run_logged("diagnose-unavailable")), "diagnose_unavailable").grid(row=6, column=2, columnspan=2, sticky="ew", padx=(8, 0), pady=4)
 
     def _build_account_page(self, parent: ttk.Frame) -> None:
         card = self._card(parent, "account_actions")
@@ -820,7 +825,7 @@ class TelegramArchiveApp(tk.Tk):
     def _index_media(self) -> None:
         self._run_logged("index", limit=self.limit_var.get(), new_only=True)
 
-    def _resume_pending(self) -> None:
+    def _resume_pending(self, retry_errors: bool = False) -> None:
         self._save_settings()
         self._run_logged(
             "resume",
@@ -830,6 +835,7 @@ class TelegramArchiveApp(tk.Tk):
             poll_interval=self.poll_interval_var.get(),
             sync_new=self.sync_new_var.get(),
             index_interval=self.index_interval_var.get(),
+            retry_errors=retry_errors,
         )
 
     def _start_auto_sync(self) -> None:
@@ -879,6 +885,7 @@ class TelegramArchiveApp(tk.Tk):
         sync_new: bool = False,
         index_interval: str = "",
         new_only: bool = False,
+        retry_errors: bool = False,
     ) -> None:
         try:
             command = build_command(
@@ -894,6 +901,7 @@ class TelegramArchiveApp(tk.Tk):
                 sync_new=sync_new,
                 index_interval=index_interval,
                 new_only=new_only,
+                retry_errors=retry_errors,
             )
         except ValueError as exc:
             messagebox.showerror(self._t("invalid_options"), str(exc))
@@ -937,7 +945,7 @@ class TelegramArchiveApp(tk.Tk):
             return
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        if label in {"download", "resume"}:
+        if label in {"download", "resume", "diagnose-unavailable"}:
             try:
                 archive_paths(self._root_path()).sync_stop_path.unlink()
             except FileNotFoundError:
@@ -993,6 +1001,7 @@ class TelegramArchiveApp(tk.Tk):
                 logger.info("%s", line.rstrip())
                 self.output_queue.put(("log", line))
             code = process.wait()
+            runtime_event("child_exit", command=label, exit_code=code, stop_requested=self._stop_requested)
             logger.info("%s exited with code %s; stop_requested=%s", label, code, self._stop_requested)
         finally:
             if handler is not None:
@@ -1114,14 +1123,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     enable_dpi_awareness()
     args = parse_args(argv)
-    app = TelegramArchiveApp(initial_root=args.root)
+    app = TelegramArchiveApp(initial_root=args.root, background=args.background)
     if args.background and app.tray_icon:
         app.withdraw()
     if args.auto_resume:
         app.after(1000, app._resume_pending)
     elif args.auto_sync:
         app.after(1000, app._start_auto_sync)
-    app.mainloop()
+    with RuntimeJournal(archive_paths(app._root_path()).log_dir, "gui", "app"):
+        app.mainloop()
 
 
 if __name__ == "__main__":

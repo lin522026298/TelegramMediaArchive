@@ -253,7 +253,7 @@ class ReviewFixTests(unittest.TestCase):
                     for dark in (False, True):
                         app.dark_var.set(dark)
                         app._apply_theme()
-                        for page in ("dashboard", "settings"):
+                        for page in ("dashboard", "settings", "download"):
                             app._show_page(page)
                             app.update_idletasks()
                             height = int(app.geometry().split("x")[1].split("+")[0])

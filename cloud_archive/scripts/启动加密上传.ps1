@@ -2,10 +2,13 @@
     [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
     [string]$ArchiveRoot = "",
     [string]$BandwidthLimit = "off",
-    [int]$PollInterval = 300
+    [int]$PollInterval = 300,
+    [switch]$DetachedHost
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot '独立后台主机.ps1')
+if (Invoke-IndependentArchiveHost -ScriptPath $PSCommandPath -Parameters $PSBoundParameters -DetachedHost:$DetachedHost) { return }
 if (-not $ArchiveRoot) { . (Join-Path $PSScriptRoot "读取运行路径.ps1") -BaseDir $BaseDir }
 $Uploader = Join-Path $BaseDir "TelegramCloudUploader.exe"
 $StartOpenList = Join-Path $PSScriptRoot "启动OpenList.ps1"

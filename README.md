@@ -12,7 +12,7 @@
 
 该目录下的 `state` 会保存 `config.json`、Telegram `.session` 和 SQLite 状态库；`media` 保存实际下载文件；`logs` 保存日志。这些都是本地状态和敏感信息，不应提交到 git。
 
-0.1.8 修复 Telegram 图片大小与下载版本不一致：显式选择同一图片版本，持久记录来源，未知来源旧图片断点隔离保留，不关闭大小校验。详见 [图片修复说明](docs/reviews/0.1.8-图片版本修复.md)。0.1.7 的 R1–R10 修复继续保留，云中转和下载解耦；不会默认添加开机项。
+0.1.9 改为空闲槽位即时补位、持久失败冷却与原始不可用响应复查，并添加独立运行事件日志和脱离 Windows Job 的手动启动主机。保留 0.1.8 的显式图片版本、未知旧断点隔离及所有安全门。详见 [调度与运行修复](docs/reviews/0.1.9-调度与运行修复.md)。云中转和下载解耦，不默认添加开机项。
 
 ## 安装
 
@@ -157,7 +157,11 @@ python tg_media_archive.py resume --workers 3 --watch --poll-interval 300 --sync
 
 `--sync-new` 的索引协程和下载协程共享同一个 Telethon 客户端和 `.session`，不会用两个进程争抢会话文件。安全停止通过 `<归档目录>\state\STOP_TELEGRAM_SYNC` 请求；下一次由 APP 启动下载时会自动移除旧停止标记。
 
-并发下载按数据库里的消息时间和消息 ID 分批调度，例如 `--workers 4` 会同时处理当前顺序里的 4 个文件，等这一批结束后再进入下一批。每个文件写入独立的 `.part` 文件，完成后再原子重命名为正式文件；断点续传按磁盘上实际 `.part` 大小恢复，不依赖日志里的进度数字。
+并发下载按数据库里的消息时间、消息 ID 和媒体序号依次启动，最多保持 `--workers` 个任务；任一任务结束后立即补位，不再等待整批最慢文件。并发任务的完成先后本来就可能不同，文件命名和排序标识不变。每个文件写入独立 `.part`，完整长度匹配后原子改名；续传按磁盘上实际大小恢复。
+
+失败记录保留在本地，普通错误按 5 分钟起指数退避、最长 6 小时；消息空返回或无媒体每 24 小时复查，明确权限错误每小时重试，不永久删除或静默排除。下载页提供“重试冷却中的错误项”（只释放一次旧冷却，新失败仍退避）与“复查不可用媒体”（原始消息 RPC，不下载）；先停止当前会话命令再操作。CLI 对应 `resume --retry-errors` 和 `diagnose-unavailable`。
+
+下载、GUI、上传器各自记录有界 `runtime-*.jsonl` 启动/退出证据。用工具的连续归档脚本手动启动时，Windows Job 内的脚本会通过隐藏 WMI 主机脱离后再启动业务；不创建服务、计划任务或开机项。没有退出记录只能证明运行异常中断，不能凭空判断是谁结束了进程。
 
 下载器与云归档反压均默认预留 20 GiB 空闲空间。领取下一批文件前会估算整批大小，
 云上传队列积压或剩余空间触及保护线时会等待，不会删除 `.part` 或重建下载状态。
@@ -205,9 +209,9 @@ python -m venv .venv
 输出文件：
 
 ```text
-release\TelegramMediaArchive-0.1.8-source.zip
-release\TelegramMediaArchive-0.1.8-windows-x86_64.zip
-release\TelegramMediaArchive-0.1.8-windows-x86_64\
+release\TelegramMediaArchive-0.1.9-source.zip
+release\TelegramMediaArchive-0.1.9-windows-x86_64.zip
+release\TelegramMediaArchive-0.1.9-windows-x86_64\
 ```
 
 便携包里包含：

@@ -1,9 +1,12 @@
 ﻿param(
     [string]$BaseDir = (Split-Path -Parent $PSScriptRoot),
-    [switch]$OpenBrowser
+    [switch]$OpenBrowser,
+    [switch]$DetachedHost
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot '独立后台主机.ps1')
+if (Invoke-IndependentArchiveHost -ScriptPath $PSCommandPath -Parameters $PSBoundParameters -DetachedHost:$DetachedHost) { return }
 $Exe = Join-Path $BaseDir "openlist.exe"
 $DataDir = Join-Path $BaseDir "data"
 if (-not (Test-Path -LiteralPath $Exe)) {

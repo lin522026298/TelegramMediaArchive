@@ -23,6 +23,7 @@ class OpenListLauncherTests(unittest.TestCase):
             pid.write_text("12345", encoding="ascii")
             script = r"""
 $ErrorActionPreference = 'Stop'
+Add-Type 'public static class ArchiveLaunchNative { public static int InJob() { return 0; } }'
 $global:TestQueries = 0
 $global:TestStarted = 0
 function Get-NetTCPConnection {

@@ -1,5 +1,15 @@
 # Technical Reproduction Guide for AI and Developers
 
+## 0.1.9 Implementation Contract
+
+`run_download_pool` pops only dispatched records from a deque and waits for FIRST_COMPLETED to refill bounded slots. The unchanged date/message/media-index ordering governs starts, not completion times. Every start checks stop/backpressure and reserves active full sizes plus the next size above the 20 GiB floor. On stall/index failure cancel and await all active workers before reconnect; retain only the undispatched cursor in that pass. Cancelled partials remain eligible next pass. Do not reintroduce batch barriers or parallel clients using the same session.
+
+`media_retry` is an additive side table keyed by the existing composite media key. Default public `list_pending` remains compatible; production selection explicitly applies `respect_cooldown=True`. Import legacy error counts once without inventing raw observations, persist UTC deadlines, clear current cooldown on success, and retain legacy media retry totals. Ordinary delays are 300s exponential capped at 21600s, empty/no-media 86400s, explicit access 3600s. `resume --retry-errors` releases existing deadlines once before entering the loop; never bypass on each watch pass.
+
+`diagnose-unavailable` holds the normal session ProcessLock, obtains raw message RPC batches of <=50, and records response constructor versus absent media. A visible-media observation returns an error item to pending without resetting local_path/downloaded_size. Do not claim MessageEmpty proves a deletion cause. Telethon's patched MessageEmpty constructor may require peer_id in fixtures; runtime isinstance checks remain valid. Keep `raise_last_call_error=True` to retain upstream error class after bounded SDK retries. Never log access hashes/file references.
+
+`runtime_events.py` records role/run id, PID/parent, Job membership and bounded progress independently of GUI stdout. Logs are 2MiB x4 per role and exceptions record types, not arbitrary secrets. Abrupt termination may omit exit; record that absence on restart without claiming a historical culprit. `独立后台主机.ps1` relaunches only a Job-bound/unknown manual startup script through hidden local WMI; the new host must report outside all Jobs or fail closed without recursion. No startup task/service is created. Verify production child membership after launch, not just the launcher result.
+
 This document is written for future agents and maintainers. It explains how to reproduce the project, avoid known traps, and produce release artifacts.
 
 ## 0.1.8 Photo representation contract

@@ -20,6 +20,7 @@ import sys
 import time
 import threading
 import uuid
+from collections import deque
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time as day_time, timedelta, timezone
 from pathlib import Path
@@ -28,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 from sqlite_snapshot import create_daily_snapshot
 from process_lock import AlreadyRunningError, ProcessLock
+from runtime_events import runtime_event, RuntimeJournal
 
 
 DEFAULT_ROOT = Path(os.environ.get("TG_ARCHIVE_ROOT", str(Path.home() / "Downloads" / "TelegramMediaArchive")))
@@ -39,6 +41,8 @@ DEFAULT_POLL_INTERVAL_SECONDS = 300
 DEFAULT_INDEX_INTERVAL_SECONDS = 300
 NETWORK_PROGRESS_TIMEOUT_SECONDS = 180
 STALL_RETRY_SECONDS = 10
+RETRY_MAX_SECONDS = 6 * 3600
+UNAVAILABLE_RECHECK_SECONDS = 24 * 3600
 BACKPRESSURE_FLAG_NAME = "cloud-backpressure.pause"
 SYNC_STOP_FILE_NAME = "STOP_TELEGRAM_SYNC"
 CONFIG_NAME = "config.json"
@@ -67,6 +71,32 @@ class ArchiveBindingError(ValueError):
 
 class SyncStopRequested(Exception):
     pass
+
+
+def failure_kind(error: Any) -> str:
+    name = type(error).__name__
+    text = str(error)
+    if name in {"ChannelPrivateError", "ChatAdminRequiredError", "UserBannedInChannelError", "AuthKeyUnregisteredError", "SessionRevokedError"}:
+        return "access_denied"
+    if "FileReference" in name or "Fileref" in name:
+        return "file_reference"
+    if isinstance(error, (TimeoutError, ConnectionError)) or name in {"TimeoutError", "ServerError", "TimedOutError", "RpcCallFailError", "RpcMcgetFailError"} or "Request was unsuccessful" in text:
+        return "network_or_server"
+    if isinstance(error, OSError):
+        return "local_io"
+    if "message or media no longer available" in text:
+        return "legacy_unavailable"
+    if "Incomplete download:" in text:
+        return "size_mismatch"
+    return "other"
+
+
+def retry_delay(kind: str, failures: int) -> int:
+    if kind in {"message_empty", "message_without_media", "legacy_unavailable"}:
+        return UNAVAILABLE_RECHECK_SECONDS
+    if kind == "access_denied":
+        return 3600
+    return min(RETRY_MAX_SECONDS, 300 * 2 ** min(max(failures - 1, 0), 10))
 
 
 @dataclass(frozen=True)
@@ -306,6 +336,18 @@ class ArchiveDB:
                 identity text not null,
                 primary key (chat_id, message_id, media_index)
             );
+            create table if not exists media_retry (
+                chat_id integer not null,
+                message_id integer not null,
+                media_index integer not null,
+                error_kind text not null,
+                failures integer not null,
+                first_seen text not null,
+                last_seen text not null,
+                next_attempt_at text not null,
+                observation text not null default '{}',
+                primary key (chat_id, message_id, media_index)
+            );
             """
         )
         self.conn.commit()
@@ -391,10 +433,22 @@ class ArchiveDB:
                 """,
                 (local_path, downloaded_size, utc_now_iso(), key.chat_id, key.message_id, key.media_index),
             )
+            self.conn.execute("delete from media_retry where chat_id=? and message_id=? and media_index=?", (key.chat_id, key.message_id, key.media_index))
             self.conn.commit()
 
-    def mark_error(self, key: MediaKey, error: str) -> None:
+    def mark_error(self, key: MediaKey, error: str, *, kind: str | None = None, observation: dict | None = None) -> None:
         with self._lock:
+            now = datetime.now(timezone.utc)
+            kind = kind or failure_kind(error)
+            old = self.conn.execute("select failures,first_seen from media_retry where chat_id=? and message_id=? and media_index=?", (key.chat_id, key.message_id, key.media_index)).fetchone()
+            failures = int(old[0]) + 1 if old else 1
+            self.conn.execute(
+                "insert or replace into media_retry values (?,?,?,?,?,?,?,?,?)",
+                (key.chat_id, key.message_id, key.media_index, kind, failures,
+                 old[1] if old else now.isoformat(), now.isoformat(),
+                 (now + timedelta(seconds=retry_delay(kind, failures))).isoformat(),
+                 json.dumps(observation or {}, ensure_ascii=True)),
+            )
             self.conn.execute(
                 """
                 update media
@@ -406,6 +460,33 @@ class ArchiveDB:
                 """,
                 (error[:1000], utc_now_iso(), key.chat_id, key.message_id, key.media_index),
             )
+            self.conn.commit()
+
+    def schedule_legacy_errors(self) -> None:
+        rows = self.conn.execute("""select m.chat_id,m.message_id,m.media_index,m.error,m.retries,m.updated_at
+            from media m where m.status='error' and not exists
+            (select 1 from media_retry r where r.chat_id=m.chat_id and r.message_id=m.message_id and r.media_index=m.media_index)""").fetchall()
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            for row in rows:
+                kind = failure_kind(row["error"] or "")
+                failures = max(int(row["retries"]), 1)
+                self.conn.execute("insert or ignore into media_retry values (?,?,?,?,?,?,?,?,?)",
+                    (row["chat_id"], row["message_id"], row["media_index"], kind, failures,
+                     now.isoformat(), now.isoformat(),
+                     (now + timedelta(seconds=retry_delay(kind, failures))).isoformat(),
+                     json.dumps({"source": "legacy_error_without_raw_response", "legacy_last_error_at": row["updated_at"]})))
+            self.conn.commit()
+
+    def release_error_cooldowns(self) -> None:
+        with self._lock:
+            self.conn.execute("update media_retry set next_attempt_at=?", (utc_now_iso(),))
+            self.conn.commit()
+
+    def mark_observed_available(self, key: MediaKey) -> None:
+        with self._lock:
+            self.conn.execute("update media set status='pending',error=null,updated_at=? where chat_id=? and message_id=? and media_index=? and status='error'", (utc_now_iso(), key.chat_id, key.message_id, key.media_index))
+            self.conn.execute("delete from media_retry where chat_id=? and message_id=? and media_index=?", (key.chat_id, key.message_id, key.media_index))
             self.conn.commit()
 
     def reset_missing_download(self, key: MediaKey) -> None:
@@ -431,6 +512,7 @@ class ArchiveDB:
         include_errors: bool = True,
         limit: int | None = None,
         chat_id: int | None = None,
+        respect_cooldown: bool = False,
     ) -> list[MediaRecord]:
         filters = ["status NOT IN ('downloaded', 'archived')"]
         params: list[Any] = []
@@ -439,6 +521,9 @@ class ArchiveDB:
             params.append(chat_id)
         if not include_errors:
             filters.append("status != 'error'")
+        if respect_cooldown:
+            filters.append("not exists (select 1 from media_retry r where r.chat_id=media.chat_id and r.message_id=media.message_id and r.media_index=media.media_index and r.next_attempt_at > ?)")
+            params.append(utc_now_iso())
         if start_utc is not None:
             filters.append("date_utc >= ?")
             params.append(ensure_utc(start_utc).isoformat())
@@ -602,13 +687,13 @@ async def create_client(root: Path):
             config["phone"] = input("Phone number with country code, e.g. +8613800000000: ").strip()
             save_config(root, config)
         api = API.TelegramDesktop.Generate(unique_id=str(session_path(root)))
-        client = TelegramClient(str(session_path(root)), api=api)
+        client = TelegramClient(str(session_path(root)), api=api, raise_last_call_error=True)
     else:
         require_telethon()
         from telethon import TelegramClient
 
         config = prompt_missing_config(root, config)
-        client = TelegramClient(str(session_path(root)), int(config["api_id"]), str(config["api_hash"]))
+        client = TelegramClient(str(session_path(root)), int(config["api_id"]), str(config["api_hash"]), raise_last_call_error=True)
     try:
         await client.start(phone=str(config["phone"]))
     except BaseException:
@@ -854,6 +939,33 @@ async def run_download_batch(awaitables: Iterable[Any], index_task: asyncio.Task
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def run_download_pool(queue, workers, start_one, can_start, index_task=None):
+    """Pop only dispatched records; a reconnect retains the undispatched cursor."""
+    active = {}
+    blocked = None
+    try:
+        while queue or active:
+            check_index_task(index_task)
+            blocked = None
+            while queue and len(active) < workers:
+                blocked = can_start(queue[0], list(active.values()))
+                if blocked:
+                    break
+                record = queue.popleft()
+                active[asyncio.create_task(start_one(record))] = record
+            if not active:
+                return blocked
+            done, _ = await asyncio.wait(active, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                active.pop(task)
+                task.result()
+        return blocked
+    finally:
+        for task in active:
+            task.cancel()
+        await asyncio.gather(*active, return_exceptions=True)
+
+
 async def incremental_index_loop(
     client: Any,
     entity: Any,
@@ -910,7 +1022,69 @@ async def select_chat(root: Path) -> None:
         await client.disconnect()
 
 
-async def download_one(
+async def diagnose_unavailable(root: Path) -> dict[str, int]:
+    """Use raw responses under the same exclusive session lock, without downloading."""
+    from telethon import functions, types, utils
+    client, config = await await_network_progress(create_client(root), root)
+    db = ArchiveDB(db_path(root))
+    counts: dict[str, int] = {}
+    try:
+        entity = await await_network_progress(get_configured_entity(client, root, config), root)
+        chat_id = int(config["chat_id"])
+        db.bind_chat(chat_id)
+        db.schedule_legacy_errors()
+        rows = db.conn.execute("select message_id,media_index from media where chat_id=? and status='error' and error='message or media no longer available' order by message_id,media_index", (chat_id,)).fetchall()
+        for batch in batch_records(rows, 50):
+            ids = [int(row["message_id"]) for row in batch]
+            request = (functions.channels.GetMessagesRequest(utils.get_input_channel(entity), ids)
+                       if isinstance(entity, types.Channel) else functions.messages.GetMessagesRequest(ids))
+            response = await await_network_progress(client(request), root)
+            observed = {int(message.id): message for message in response.messages}
+            for row in batch:
+                key = MediaKey(chat_id, int(row["message_id"]), int(row["media_index"]))
+                message = observed.get(key.message_id)
+                if message is None or isinstance(message, types.MessageEmpty):
+                    kind = "message_empty"
+                elif not getattr(message, "media", None):
+                    kind = "message_without_media"
+                else:
+                    kind = "available_now"
+                counts[kind] = counts.get(kind, 0) + 1
+                if kind == "available_now":
+                    db.mark_observed_available(key)
+                else:
+                    db.mark_error(key, "message or media no longer available", kind=kind,
+                                  observation={"source": "raw_message_rpc", "response_type": type(message).__name__,
+                                               "message_exists": message is not None and not isinstance(message, types.MessageEmpty),
+                                               "media_type": type(getattr(message, "media", None)).__name__})
+                runtime_event("metadata_observation", message_id=key.message_id, kind=kind,
+                              response_type=type(message).__name__)
+        print(json.dumps({"unavailable_recheck": counts, "deletion_proven": False}, ensure_ascii=True))
+        return counts
+    finally:
+        db.close()
+        await asyncio.wait_for(client.disconnect(), timeout=30)
+
+
+async def download_one(client, entity, root, tz, db, record, chunk_size) -> bool:
+    try:
+        return await _download_one(client, entity, root, tz, db, record, chunk_size)
+    except SyncStopRequested:
+        return False
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        kind = failure_kind(exc)
+        db.mark_error(record.key, f"{type(exc).__name__}: {exc}", kind=kind,
+                      observation={"exception_type": type(exc).__name__, "rpc_code": getattr(exc, "code", None)})
+        print(f"error msg={record.message_id}: {kind}: {type(exc).__name__}: {exc}")
+        runtime_event("file_error", message_id=record.message_id, kind=kind, exception_type=type(exc).__name__)
+        if isinstance(exc, DownloadStalledError):
+            raise
+        return False
+
+
+async def _download_one(
     client: Any,
     entity: Any,
     root: Path,
@@ -935,12 +1109,11 @@ async def download_one(
         )
     except SyncStopRequested:
         return False
-    except DownloadStalledError as exc:
-        db.mark_error(record.key, str(exc))
-        raise
     if not message or not getattr(message, "media", None):
-        db.mark_error(record.key, "message or media no longer available")
-        print(f"missing media msg={record.message_id}")
+        kind = "message_empty" if not message or type(message).__name__ == "MessageEmpty" else "message_without_media"
+        db.mark_error(record.key, "message or media no longer available", kind=kind,
+                      observation={"response_type": type(message).__name__, "source": "get_messages"})
+        print(f"missing media msg={record.message_id}; kind={kind}; recheck in 24 hours")
         return False
 
     download_location = message.media
@@ -1013,12 +1186,14 @@ async def download_one(
                             f"({format_bytes(int(speed / elapsed))}/s)"
                         )
                         last_print = now
+                        runtime_event("download_progress", throttle=True, message_id=record.message_id, bytes=downloaded_on_disk)
         if record.size is not None and part_path.stat().st_size != record.size:
             raise ValueError(
                 f"Incomplete download: expected {record.size} bytes, got {part_path.stat().st_size}"
             )
         part_path.replace(final_path)
         db.mark_downloaded(record.key, rel_path.as_posix(), final_path.stat().st_size)
+        runtime_event("file_complete", message_id=record.message_id, bytes=final_path.stat().st_size)
         print(f"saved {rel_path}")
         return True
     except (SyncStopRequested, asyncio.CancelledError):
@@ -1028,12 +1203,6 @@ async def download_one(
             print(f"stop requested; kept resumable part {rel_path}")
             return False
         raise
-    except Exception as exc:
-        db.mark_error(record.key, f"{type(exc).__name__}: {exc}")
-        print(f"error msg={record.message_id}: {type(exc).__name__}: {exc}")
-        if isinstance(exc, DownloadStalledError):
-            raise
-        return False
 
 
 async def download_media(
@@ -1066,6 +1235,7 @@ async def download_media(
         entity = await await_network_progress(get_configured_entity(client, root, config), root)
         chat_id = int(config["chat_id"])
         db.bind_chat(chat_id)
+        db.schedule_legacy_errors()
         refresh_chat_metadata(root, config, entity)
         min_free_bytes = int(min_free_gb * 1024**3)
         index_task = (
@@ -1092,8 +1262,9 @@ async def download_media(
                 continue
 
             check_index_task(index_task)
-            records = db.list_pending(start_utc=start_utc, end_utc=end_utc, kind=kind, include_errors=True, limit=limit, chat_id=chat_id)
+            records = db.list_pending(start_utc=start_utc, end_utc=end_utc, kind=kind, include_errors=True, limit=limit, chat_id=chat_id, respect_cooldown=True)
             print(f"Pending records selected: {len(records)}")
+            runtime_event("queue_pass", selected=len(records))
             if not records:
                 if not watch:
                     break
@@ -1104,33 +1275,30 @@ async def download_media(
 
             stopped_for_space = False
             stopped_for_backpressure = False
-            for batch in batch_records(records, workers):
+            queue = deque(records)
+
+            def can_start(record, active):
                 if stop_file.exists():
-                    print("Continuous sync stop requested before the next batch.")
-                    return
+                    return "stop"
                 if backpressure.exists():
-                    print(
-                        "Cloud archive backpressure became active. "
-                        "Pausing before the next download batch."
-                    )
-                    stopped_for_backpressure = True
-                    break
-                required_bytes = sum(record.size or 0 for record in batch)
+                    return "backpressure"
+                # Reserve active workers' full sizes as well as the next file.
+                required_bytes = sum(item.size or 0 for item in [*active, record])
                 free_bytes = shutil.disk_usage(root).free
                 if not has_enough_space(free_bytes, required_bytes, min_free_bytes):
-                    print(
-                        "Stopping before disk gets too full: "
-                        f"free={format_bytes(free_bytes)}, next_batch={format_bytes(required_bytes)}, "
-                        f"minimum_free={format_bytes(min_free_bytes)}"
-                    )
-                    stopped_for_space = True
-                    break
+                    return "space"
+                return None
+
+            while queue:
                 try:
-                    results = await run_download_batch(
-                        (download_one(client, entity, root, tz, db, record, chunk_size) for record in batch), index_task
+                    reason = await run_download_pool(
+                        queue, workers,
+                        lambda record: download_one(client, entity, root, tz, db, record, chunk_size),
+                        can_start, index_task,
                     )
                 except DownloadStalledError as exc:
-                    print(f"Stalled batch kept for a later pass: {exc}", file=sys.stderr)
+                    print(f"Stalled active files kept for a later pass: {exc}", file=sys.stderr)
+                    runtime_event("reconnect", reason="no_network_progress")
                     if index_task is not None:
                         index_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError, DownloadStalledError, SyncStopRequested):
@@ -1147,13 +1315,17 @@ async def download_media(
                         index_task = asyncio.create_task(
                             incremental_index_loop(client, entity, db, root, chat_id, index_interval)
                         )
-                    # Keep the pass cursor: one persistently bad file must not starve later batches.
+                    # Only not-yet-started files remain in this pass's queue.
                     continue
-                if stop_file.exists():
+                if reason == "stop" or stop_file.exists():
                     print("Continuous sync stopped; .part files remain resumable.")
+                    runtime_event("safe_stop")
                     return
-                if any(result is not True for result in results):
-                    await asyncio.sleep(2)
+                stopped_for_space = reason == "space"
+                stopped_for_backpressure = reason == "backpressure"
+                if stopped_for_space or stopped_for_backpressure:
+                    runtime_event("intentional_wait", reason=reason)
+                    break
 
             if not watch:
                 break
@@ -1403,6 +1575,7 @@ def build_parser() -> argparse.ArgumentParser:
     login_builtin.add_argument("--phone", required=True)
     sub.add_parser("chats", help="List recent chats")
     sub.add_parser("select-chat", help="Interactively select target chat")
+    sub.add_parser("diagnose-unavailable", help="Recheck unavailable records using raw message responses; never deletes")
 
     index = sub.add_parser("index", help="Index media messages into SQLite")
     index.add_argument("--limit", type=int, default=None)
@@ -1433,6 +1606,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--poll-interval", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS, help="Seconds to wait between watch polls")
     resume.add_argument("--sync-new", action="store_true", help="Continuously index newly posted group media while downloading")
     resume.add_argument("--index-interval", type=int, default=DEFAULT_INDEX_INTERVAL_SECONDS, help="Seconds between incremental group index checks")
+    resume.add_argument("--retry-errors", action="store_true", help="Release existing error cooldowns once; new failures back off normally")
 
     verify = sub.add_parser("verify", help="Verify downloaded files")
     verify.add_argument("--repair", action="store_true")
@@ -1460,6 +1634,9 @@ def _main(argv: Sequence[str] | None = None) -> int:
         asyncio.run(list_chats(root))
     elif command == "select-chat":
         asyncio.run(select_chat(root))
+    elif command == "diagnose-unavailable":
+        sync_stop_path(root).unlink(missing_ok=True)
+        asyncio.run(diagnose_unavailable(root))
     elif command == "index":
         asyncio.run(index_media(root, limit=args.limit, new_only=args.new_only))
     elif command == "summary":
@@ -1480,6 +1657,13 @@ def _main(argv: Sequence[str] | None = None) -> int:
             args.index_interval,
         )
     elif command == "resume":
+        if args.retry_errors:
+            db = ArchiveDB(db_path(root))
+            try:
+                db.schedule_legacy_errors()
+                db.release_error_cooldowns()
+            finally:
+                db.close()
         return run_download_command(
             root,
             None,
@@ -1510,7 +1694,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _main(argv)
     try:
         with ProcessLock(args.root.resolve() / "state" / "telegram-session.lock"):
-            return _main(argv)
+            with RuntimeJournal(args.root.resolve() / "logs", "cli", command) as journal:
+                code = _main(argv)
+                journal.record("command_return", exit_code=code)
+                return code
     except (AlreadyRunningError, ArchiveBindingError) as exc:
         print(str(exc), file=sys.stderr)
         return 2

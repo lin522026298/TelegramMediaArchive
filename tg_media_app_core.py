@@ -11,7 +11,7 @@ from pathlib import Path
 from tg_media_archive import DEFAULT_MIN_FREE_GB, DEFAULT_ROOT
 
 
-APP_VERSION = "0.1.8"
+APP_VERSION = "0.1.9"
 VALID_KINDS = {"all", "photo", "video"}
 MAX_WORKERS = 8
 DEFAULT_WORKERS = "4"
@@ -45,6 +45,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "month_summary": "Month Summary",
         "download_range": "Download Range",
         "resume_pending": "Resume Pending",
+        "retry_errors": "Retry Cooled Errors",
+        "diagnose_unavailable": "Recheck Unavailable Media",
         "nav_dashboard": "Dashboard",
         "nav_download": "Download",
         "nav_account": "Account",
@@ -156,6 +158,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "month_summary": "月份统计",
         "download_range": "按范围下载",
         "resume_pending": "继续未完成",
+        "retry_errors": "重试冷却中的错误项",
+        "diagnose_unavailable": "复查不可用媒体",
         "nav_dashboard": "总览",
         "nav_download": "下载",
         "nav_account": "账户",
@@ -547,6 +551,7 @@ def build_command(
     sync_new: bool = False,
     index_interval: str = "",
     new_only: bool = False,
+    retry_errors: bool = False,
 ) -> list[str]:
     if options.cli_exe is not None:
         command = [str(options.cli_exe), "--root", str(options.root), action]
@@ -581,6 +586,8 @@ def build_command(
             if index_interval.strip():
                 command.extend(["--index-interval", index_interval.strip()])
     elif action == "resume":
+        if retry_errors:
+            command.append("--retry-errors")
         command.extend(["--min-free-gb", str(DEFAULT_MIN_FREE_GB)])
         if limit.strip():
             validate_download_options("", "", "all", limit)

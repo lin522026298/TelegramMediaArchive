@@ -4,10 +4,13 @@
     [string]$ArchiveRoot = "",
     [string]$BandwidthLimit = "off",
     [int]$UploadPollInterval = 60,
-    [switch]$Background
+    [switch]$Background,
+    [switch]$DetachedHost
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot '独立后台主机.ps1')
+if (Invoke-IndependentArchiveHost -ScriptPath $PSCommandPath -Parameters $PSBoundParameters -DetachedHost:$DetachedHost) { return }
 if (-not $ArchiveRoot -or -not $AppDir) { . (Join-Path $PSScriptRoot "读取运行路径.ps1") -BaseDir $BaseDir }
 $AppExe = Join-Path $AppDir "TelegramMediaArchive.exe"
 $CliExe = Join-Path $AppDir "TelegramMediaArchiveCLI.exe"

@@ -1134,7 +1134,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         if args.poll_interval < 10:
             parser.error("--poll-interval must be at least 10 seconds")
-        return run_uploader(args)
+        from runtime_events import RuntimeJournal
+        with RuntimeJournal(Path(args.base_dir) / "logs", "uploader", "run"):
+            return run_uploader(args)
     if args.command == "status":
         return print_status(args)
     if args.command == "restore":
